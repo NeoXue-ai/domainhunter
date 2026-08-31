@@ -1,0 +1,25 @@
+{
+  "scenario": "wildcard",
+  "description": "CN=*.example.com with SAN entries for several subdomains. Per spec, the wildcard prefix is stripped before normalization so the registrable root is exposed.",
+  "expected_hostnames": ["app.example.com", "blog.example.com", "example.com"],
+  "expected_events_count": 3,
+  "expected_domain": "example.com",
+  "entries": [
+    {
+      "source_event_id": "argon:wildcard:1",
+      "observed_at": "2026-08-10T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": "*.example.com"},
+          "all_domains": [
+            "*.example.com",
+            "app.example.com",
+            "blog.example.com",
+            "example.com"
+          ],
+          "issuer": {"O": "DigiCert", "CN": "DigiCert TLS Hybrid ECC"}
+        }
+      }
+    }
+  ]
+}

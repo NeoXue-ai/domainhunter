@@ -1,0 +1,40 @@
+{
+  "scenario": "invalid_homepage",
+  "description": "Homepage values that must be rejected as InvalidGitHubHomepage: IP literal, ftp scheme, empty string, missing scheme, and a hostname with credentials. Only the one valid row should append.",
+  "expected_repositories": 6,
+  "expected_invalid_homepages": 5,
+  "expected_events_added": 1,
+  "expected_domains": ["example.com"],
+  "repositories": [
+    {
+      "repository_id": "repo-invalid-1",
+      "homepage": "http://192.168.0.1",
+      "observed_at": "2026-08-10T00:00:00Z"
+    },
+    {
+      "repository_id": "repo-invalid-2",
+      "homepage": "ftp://example.com",
+      "observed_at": "2026-08-10T00:00:00Z"
+    },
+    {
+      "repository_id": "repo-invalid-3",
+      "homepage": "",
+      "observed_at": "2026-08-10T00:00:00Z"
+    },
+    {
+      "repository_id": "repo-invalid-4",
+      "homepage": "example.com",
+      "observed_at": "2026-08-10T00:00:00Z"
+    },
+    {
+      "repository_id": "repo-invalid-5",
+      "homepage": "https://user:pass@example.com",
+      "observed_at": "2026-08-10T00:00:00Z"
+    },
+    {
+      "repository_id": "repo-valid-1",
+      "homepage": "https://example.com",
+      "observed_at": "2026-08-10T00:00:00Z"
+    }
+  ]
+}

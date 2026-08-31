@@ -1,0 +1,10 @@
+{"url": "https://example-ai-saas-1.example.com/", "primary_outcome": "publishable_ai_saas", "confidence": 0.92, "category": "ai_assistant"}
+{"url": "https://example-ai-saas-2.example.io/", "primary_outcome": "publishable_ai_saas", "confidence": 0.88, "category": "customer_support"}
+{"url": "https://example-ai-saas-3.example.dev/", "primary_outcome": "policy_excluded", "confidence": 0.74, "category": "content_generation"}
+{"url": "https://example-ai-saas-4.example.app/", "primary_outcome": "policy_excluded", "confidence": 0.71, "category": "developer_tools"}
+{"url": "https://example-ai-saas-5.example.com/", "primary_outcome": "valid_but_not_ready", "confidence": 0.66, "category": "developer_tools"}
+{"url": "https://example-ai-saas-6.example.io/", "primary_outcome": "not_target", "confidence": 0.81, "category": "other"}
+{"url": "https://example-ai-saas-7.example.dev/", "primary_outcome": "not_target", "confidence": 0.6, "category": "other"}
+{"url": "https://example-ai-saas-8.example.com/", "primary_outcome": "duplicate_or_existing", "confidence": 0.55, "category": "ai_assistant"}
+{"url": "https://example-ai-saas-9.example.app/", "primary_outcome": "policy_excluded", "confidence": 0.95, "category": "other"}
+{"url": "https://example-ai-saas-10.example.io/", "primary_outcome": "policy_excluded", "confidence": 0.62, "category": "content_generation"}

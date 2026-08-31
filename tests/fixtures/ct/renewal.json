@@ -1,0 +1,32 @@
+{
+  "scenario": "renewal",
+  "description": "Same domain observed twice with different cert_index values. Both events must ingest because the cert_index is part of the idempotency_key. Replaying the same fixture a second time is a no-op.",
+  "expected_hostnames": ["example.com"],
+  "expected_events_count": 2,
+  "expected_idempotent_on_replay": true,
+  "expected_replay_added_count": 0,
+  "entries": [
+    {
+      "source_event_id": "argon:100",
+      "observed_at": "2026-08-01T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": "example.com"},
+          "all_domains": ["example.com"],
+          "issuer": "Let's Encrypt"
+        }
+      }
+    },
+    {
+      "source_event_id": "argon:200",
+      "observed_at": "2026-08-15T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": "example.com"},
+          "all_domains": ["example.com"],
+          "issuer": "Let's Encrypt"
+        }
+      }
+    }
+  ]
+}

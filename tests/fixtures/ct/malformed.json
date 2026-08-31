@@ -1,0 +1,63 @@
+{
+  "scenario": "malformed",
+  "description": "Collection of malformed CT payloads the listener must reject or skip without crashing. Each entry is intentionally broken in a different way.",
+  "expected_hostnames": ["valid.example.com"],
+  "expected_events_count": 1,
+  "expected_invalid_messages": 4,
+  "entries": [
+    {
+      "source_event_id": "argon:bad:1",
+      "observed_at": "2026-08-10T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": ""},
+          "all_domains": [""],
+          "issuer": ""
+        }
+      }
+    },
+    {
+      "source_event_id": "argon:bad:2",
+      "observed_at": "2026-08-10T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": "localhost"},
+          "all_domains": ["127.0.0.1", "192.168.0.1", "10.0.0.1"],
+          "issuer": "Let's Encrypt"
+        }
+      }
+    },
+    {
+      "source_event_id": "argon:bad:3",
+      "observed_at": "2026-08-10T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": ".example.com"},
+          "all_domains": ["a..example.com"],
+          "issuer": "Let's Encrypt"
+        }
+      }
+    },
+    {
+      "source_event_id": "",
+      "observed_at": "2026-08-10T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": "empty-id.example.com"},
+          "all_domains": ["empty-id.example.com"]
+        }
+      }
+    },
+    {
+      "source_event_id": "argon:good:1",
+      "observed_at": "2026-08-10T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": "valid.example.com"},
+          "all_domains": ["valid.example.com"],
+          "issuer": "Let's Encrypt"
+        }
+      }
+    }
+  ]
+}

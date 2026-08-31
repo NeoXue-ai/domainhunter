@@ -1,0 +1,43 @@
+{
+  "scenario": "duplicate",
+  "description": "Identical source_event_id repeated three times. Only the first ingest appends an event; subsequent replays are no-ops thanks to the idempotency_key constraint.",
+  "expected_hostnames": ["example.com"],
+  "expected_events_count": 1,
+  "expected_idempotent_on_replay": true,
+  "expected_replay_added_count": 0,
+  "entries": [
+    {
+      "source_event_id": "argon:duplicate:42",
+      "observed_at": "2026-08-10T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": "example.com"},
+          "all_domains": ["example.com"],
+          "issuer": "Let's Encrypt"
+        }
+      }
+    },
+    {
+      "source_event_id": "argon:duplicate:42",
+      "observed_at": "2026-08-10T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": "example.com"},
+          "all_domains": ["example.com"],
+          "issuer": "Let's Encrypt"
+        }
+      }
+    },
+    {
+      "source_event_id": "argon:duplicate:42",
+      "observed_at": "2026-08-10T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": "example.com"},
+          "all_domains": ["example.com"],
+          "issuer": "Let's Encrypt"
+        }
+      }
+    }
+  ]
+}

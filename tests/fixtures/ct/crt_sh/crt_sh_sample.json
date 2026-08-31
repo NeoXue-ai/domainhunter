@@ -1,0 +1,38 @@
+{
+  "scenario": "crt_sh_sample",
+  "description": "Real crt.sh entry array shape: top-level list of dicts with id, not_before, not_after, common_name, name_value (newline-joined SAN), issuer_name. Covers cursor filter, SAN split, deduplication, and IDN/Punycode.",
+  "entries": [
+    {
+      "id": 9000000001,
+      "not_before": "2026-08-19T00:00:00Z",
+      "not_after": "2026-11-19T00:00:00Z",
+      "common_name": "nova-ai.com",
+      "name_value": "nova-ai.com\nwww.nova-ai.com",
+      "issuer_name": "Let's Encrypt"
+    },
+    {
+      "id": 9000000002,
+      "not_before": "2026-08-19T01:30:00Z",
+      "not_after": "2026-11-19T01:30:00Z",
+      "common_name": "*.brightcanvas.io",
+      "name_value": "*.brightcanvas.io\nbrightcanvas.io\napp.brightcanvas.io\napp.brightcanvas.io\n\n",
+      "issuer_name": "Google Trust Services LLC"
+    },
+    {
+      "id": 9000000003,
+      "not_before": "2026-08-19T02:00:00Z",
+      "not_after": "2026-11-19T02:00:00Z",
+      "common_name": "bücher-tts.de",
+      "name_value": "bücher-tts.de\nxn--bcher-kva-tts.de",
+      "issuer_name": "Sectigo Limited"
+    },
+    {
+      "id": 9000000004,
+      "not_before": "2026-08-19T03:00:00Z",
+      "not_after": "2026-11-19T03:00:00Z",
+      "common_name": "stubonly.com",
+      "name_value": "stubonly.com",
+      "issuer_name": "DigiCert"
+    }
+  ]
+}

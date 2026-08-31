@@ -1,0 +1,1 @@
+"""Explicit external publication adapters."""

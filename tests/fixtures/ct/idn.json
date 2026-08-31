@@ -1,0 +1,31 @@
+{
+  "scenario": "idn",
+  "description": "Internationalized domain names expressed as both Unicode (bücher.example) and Punycode (xn--bcher-kva.example). Both are accepted; Unicode form is normalized to the ASCII/Punycode equivalent.",
+  "expected_hostnames": ["xn--bcher-kva.example.com"],
+  "expected_events_count": 1,
+  "expected_normalized_to_punycode": true,
+  "entries": [
+    {
+      "source_event_id": "argon:idn:1",
+      "observed_at": "2026-08-10T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": "bücher.example.com"},
+          "all_domains": ["bücher.example.com"],
+          "issuer": "Let's Encrypt"
+        }
+      }
+    },
+    {
+      "source_event_id": "argon:idn:2",
+      "observed_at": "2026-08-10T00:00:00Z",
+      "certificate": {
+        "leaf_cert": {
+          "subject": {"CN": "xn--bcher-kva.example.com"},
+          "all_domains": ["xn--bcher-kva.example.com"],
+          "issuer": "Let's Encrypt"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+[project]
+name = "webradar-v2"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28",
+    "fastapi>=0.115",
+    "publicsuffix2>=2.20191221",
+    "websockets>=15",
+    "playwright>=1.50",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+webradar = "webradar_v2.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=9.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]

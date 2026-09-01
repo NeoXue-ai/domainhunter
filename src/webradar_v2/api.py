@@ -1448,6 +1448,7 @@ $$('.lang-toggle button').forEach(b => b.addEventListener('click', () => {
   localStorage.setItem('webradar-lang', currentLang);
   applyLang();
 }));
+</script>
 """
 
 QUEUE_SCRIPT = r"""

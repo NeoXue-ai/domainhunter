@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from webradar_v2.domain.candidates import (
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,

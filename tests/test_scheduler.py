@@ -3,9 +3,9 @@
 import asyncio
 from datetime import UTC, datetime
 
-from webradar_v2.domain.work_queue import WorkStage
-from webradar_v2.scheduler.daemon import WorkerDaemon
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.work_queue import WorkStage
+from domainhunter.scheduler.daemon import WorkerDaemon
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 NOW = datetime(2026, 8, 16, 12, 0, 0, tzinfo=UTC)
@@ -23,7 +23,7 @@ class _StubPipeline:
 
 
 def test_daemon_runs_one_tick_and_invokes_probe_handler(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     pipeline = _StubPipeline()
     assert store.enqueue_work(WorkStage.L1, "trigger-probe", scheduled_at=NOW) is True
     daemon = WorkerDaemon(
@@ -49,7 +49,7 @@ def test_daemon_runs_one_tick_and_invokes_probe_handler(tmp_path) -> None:
 
 
 def test_daemon_respects_budget_gate(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     pipeline = _StubPipeline()
     # Saturate the daily L1 budget before the daemon starts.
     store.reserve_budget(
@@ -76,7 +76,7 @@ def test_daemon_respects_budget_gate(tmp_path) -> None:
 
 
 def test_daemon_claims_and_releases_leases(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     pipeline = _StubPipeline()
     assert store.enqueue_work(WorkStage.L1, "domain-a", scheduled_at=NOW) is True
 
@@ -114,7 +114,7 @@ def test_daemon_claims_and_releases_leases(tmp_path) -> None:
 
 
 def test_daemon_stops_on_max_ticks(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     pipeline = _StubPipeline()
     # Three triggers for three ticks.
     for i in range(3):
@@ -135,7 +135,7 @@ def test_daemon_stops_on_max_ticks(tmp_path) -> None:
 
 
 def test_daemon_handles_signal_shutdown(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     pipeline = _StubPipeline()
     assert store.enqueue_work(WorkStage.L1, "trigger-probe", scheduled_at=NOW) is True
     daemon = WorkerDaemon(
@@ -165,7 +165,7 @@ def test_daemon_handles_signal_shutdown(tmp_path) -> None:
 
 
 def test_daemon_emits_budget_deferred_when_stage_not_implemented(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     pipeline = _StubPipeline()
     assert store.enqueue_work(WorkStage.L2, "domain-b", scheduled_at=NOW) is True
     daemon = WorkerDaemon(
@@ -194,7 +194,7 @@ def test_daemon_emits_budget_deferred_when_stage_not_implemented(tmp_path) -> No
 def test_daemon_handles_unsupported_kind_without_crashing(tmp_path) -> None:
     """An unknown stage must not crash the loop; it is budget-deferred."""
 
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     pipeline = _StubPipeline()
     # L3 is also unimplemented in the daemon and should be deferred gracefully.
     assert store.enqueue_work(WorkStage.L3, "domain-c", scheduled_at=NOW) is True

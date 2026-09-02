@@ -1,7 +1,7 @@
-from webradar_v2.crawler.l1_analysis import analyze_http_document
-from webradar_v2.crawler.l2_analysis import extract_rendered_facts
-from webradar_v2.domain.candidates import CandidateOutcome, EvidenceType
-from webradar_v2.domain.rule_candidates import build_rule_candidate_draft
+from domainhunter.crawler.l1_analysis import analyze_http_document
+from domainhunter.crawler.l2_analysis import extract_rendered_facts
+from domainhunter.domain.candidates import CandidateOutcome, EvidenceType
+from domainhunter.domain.rule_candidates import build_rule_candidate_draft
 
 
 def test_builds_a_publishable_rule_draft_from_strong_product_metadata() -> None:

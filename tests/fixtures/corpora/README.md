@@ -16,7 +16,7 @@ tests/fixtures/corpora/web_pages/
 
 `ai_saas_strong.jsonl` is the **input** to a classifier — the HTML pages a
 candidate crawler would have fetched. `expected_outcomes.jsonl` is the
-expected classification output used by :func:`webradar_v2.llm.eval.evaluate_predictions`
+expected classification output used by :func:`domainhunter.llm.eval.evaluate_predictions`
 to compute Precision@K.
 
 ## What the corpus covers
@@ -70,6 +70,6 @@ for line in Path("tests/fixtures/corpora/web_pages/expected_outcomes.jsonl").rea
 ```
 
 The replay test loads both files and feeds them into
-:func:`webradar_v2.llm.eval.evaluate_predictions`. To benchmark a new
+:func:`domainhunter.llm.eval.evaluate_predictions`. To benchmark a new
 classifier, run it over the JSONL in an offline subprocess, capture the
 predictions, and pass them to the same evaluator.

@@ -2,7 +2,7 @@
 
 from fastapi.testclient import TestClient
 
-from webradar_v2.api import create_app
+from domainhunter.api import create_app
 
 
 def test_discovery_overview_empty(tmp_path) -> None:

@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from webradar_v2.domain.observations import Observation, OutcomeCode
+from domainhunter.domain.observations import Observation, OutcomeCode
 
 
 OBSERVED_AT = datetime(2026, 8, 16, tzinfo=UTC)

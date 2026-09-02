@@ -1,118 +1,146 @@
-# ct-candidate-radar
+# DomainHunter
 
-A small, opinionated tool that watches Certificate Transparency logs and GitHub
-for newly-registered domains, decides which ones look like real AI tools, and
-hands a tidy review queue to a human.
+Find newborn domains the moment they first appear in Certificate
+Transparency logs.
 
-It is built for one specific loopback workflow: a single reviewer working
-through the queue, approving, rejecting, or blocking candidates — with the
-option of an outreach draft when something is approved. There is no auth,
-no scheduler, and no public binding; everything is `127.0.0.1` by default.
+DomainHunter watches the public CT log ecosystem, keeps a first-seen
+baseline of every domain it has ever observed, and runs a five-stage
+filter funnel — static name signals, RDAP registration age, DNS
+presence, live HTTP probing, and LLM classification — so a single
+reviewer gets a short queue of *actually new* domains that look like
+real products, each with a full evidence chain.
 
-## Why it exists
+Small, opinionated, dependency-light: pure HTTP, no WebSocket, no
+third-party aggregator, no API keys. Any OpenAI-compatible LLM works.
 
-Certificate Transparency logs are public, append-only, and roughly real-time.
-Every new TLS certificate appears within seconds of issuance. If you filter
-for `*.example.com`-style hostnames with low exposure (no web archive hits,
-no DNS records older than a week), you get a stream of "this domain just
-appeared and nothing about it is indexed yet" — which is exactly the
-fingerprint of a freshly-deployed product.
+## How it works
 
-This tool turns that stream into a queue of cited candidates.
+```
+CT logs (all public logs, classic + tiled)
+  │  get-sth / get-entries / tiles
+  ▼
+first-seen baseline          ct_seen_domains — a domain appears for
+  │                          the first time anywhere → it's new
+  ▼
+S1  static signals           domain-name shape score (brand-like vs
+  │                          random-string spam), tech-TLD boost,
+  │                          bulk-registration fingerprint
+  ▼
+S2  RDAP registration age    ≤30d → tier 1 · ≤90d → tier 2 · older → drop
+  │                          (free RDAP, no key; unknown → tier 2)
+  ▼
+S3  DNS presence             does the domain resolve at all?
+  ▼
+S4  live probe               L1 HTTP probe with strict SSRF guard,
+  │                          canonical URL + evidence quotes
+  ▼
+S5  LLM classification       is it a real, running AI SaaS? fixed
+  │                          schema, evidence-restricted, any provider
+  ▼
+review queue                 keyboard-driven human review console
+```
 
-## What it does
+Every stage's output is kept: `S1` score, `S2` age verdict, `S3` DNS,
+`S4` probe outcome, `S5` LLM draft. The review console shows *why* a
+candidate is in the queue.
 
-- Polls CertStream (`wss://certstream.calidog.io/` or any compatible feed)
-  and GitHub repository search for AI-tagged repos whose Homepage field
-  is a fresh domain.
-- For each new hostname: L1 HTTP probe → L2 Playwright render → L3
-  same-host crawl. The pipeline is bounded and never phones home to
-  a vendor — every page is fetched through a strict SSRF guard.
-- Persists a cited candidate version (rule / LLM / human) and a
-  review-priority snapshot. The priority formula is auditable: each of
-  the four contributions is stored separately.
-- Surfaces the queue in a local review console (see below), where one
-  keyboard-driven reviewer can approve / reject / defer / blocklist.
-- Approved versions can be exported as an outreach draft (dry-run
-  produces a redacted contact page; real run requires explicit consent).
-- Logs funnel analytics: signal→candidate conversion, latency P50/P95,
-  per-stage budget consumption. Surfaces alerts when budgets run low.
+## Quickstart
 
-## Review console
+```bash
+python3 -m venv .venv
+bash dev_install.sh                 # editable install + macOS .pth shim
+.venv/bin/python -m pytest -q       # ~360 tests
+```
 
-The console is split into four focused pages — each can breathe and
-keep a focused aesthetic, instead of cramming everything onto one
-screen:
+### One-shot funnel
 
-| Route | Page | What's on it |
-|---|---|---|
-| `GET /` | **Queue** | KPI strip + candidate list + a slim "Run discovery" entry |
-| `GET /review/{candidate_id}` | **Review** | 48px mono domain hero, evidence, 4-arc circular gauge, decision buttons |
-| `GET /discovery` | **Discovery** | One-click CertStream run, max-probes input, recent domains |
-| `GET /ops` | **Ops** | Analytics grid, alerts list, runbook links |
+```bash
+# S1→S3 only (no network probing):
+domainhunter filter --input domains.json
+
+# S1→S4: filter + live HTTP probe, candidates persisted to SQLite:
+domainhunter filter-probe --database ./domainhunter.db --input domains.json
+
+# S1→S5: full funnel with LLM classification (MiniMax, DeepSeek, ...):
+domainhunter filter-enrich \
+  --database ./domainhunter.db \
+  --input domains.json \
+  --provider openai-compatible \
+  --base-url "https://api.minimax.chat" \
+  --token "$MINIMAX_TOKEN" \
+  --model "MiniMax-M3"
+
+# Only process domains never seen before (first-seen baseline):
+domainhunter filter-enrich --database ./domainhunter.db \
+  --input domains.json --fresh-only --provider mock
+```
+
+### Long-running discovery daemon
+
+```bash
+domainhunter discover \
+  --database ./domainhunter.db \
+  --collect-seconds 60 --round-seconds 120 \
+  --provider openai-compatible --base-url "..." --token "$TOKEN" --model "..."
+```
+
+Every round: collect from all public CT logs → first-seen filter →
+S1–S5 enrichment → mark seen. Runs forever; stop with Ctrl-C.
+
+### Review console
+
+```bash
+domainhunter serve --database ./domainhunter.db --host 127.0.0.1 --port 8000
+# open http://127.0.0.1:8000/
+```
 
 Keyboard shortcuts on `/review/<id>`: `A` approve · `R` reject ·
 `D` defer · `B` blocklist · `E` edit · `O` outreach (dry) · `J`/`K`
 and `←`/`→` paginate.
 
-The design rationale for splitting the console is in
-[`docs/design/review-console-redesign.md`](docs/design/review-console-redesign.md).
+## First-seen: the core idea
 
-## Local quickstart
+CT logs are append-only: a domain's *first* appearance anywhere in any
+public log is its "birth" in the certificate ecosystem. Newly
+registered domains typically get their first certificate within hours
+to days of registration, so first-seen time ≈ birth time. Renewals of
+old domains are just "seen again" — filtered out for free by the
+`ct_seen_domains` baseline.
 
-```bash
-python3 -m venv .venv
-bash scripts/dev_install.sh    # pip install -e . + a .pth shim for Python 3.14
-.venv/bin/python -m pytest -q  # ~320 tests
-.venv/bin/webradar serve --database ./webradar.db
-# open http://127.0.0.1:8000/
-```
+RDAP registration age then confirms it: a registrable domain that is
+≤30 days old and was never seen before is a genuine newborn, not an
+old domain that bought a fresh certificate.
 
-> **Why the `.pth` shim?** Python 3.14 marks `pip install -e .`'s
-> `__editable__…pth` as `UF_HIDDEN` on macOS, and `site.py` silently
-> skips hidden files. The companion `webradar-v2.pth` is not hidden,
-> so the package is importable without any `PYTHONPATH` override.
+## LLM providers
+
+Any OpenAI-compatible `/v1/chat/completions` endpoint works — the
+classifier is provider-agnostic and the output schema is fixed and
+evidence-restricted.
+
+| Provider | base_url | model |
+|---|---|---|
+| MiniMax | `https://api.minimax.chat` | `MiniMax-M3` |
+| DeepSeek | `https://api.deepseek.com` | `deepseek-chat` |
+| OpenAI | `https://api.openai.com` | `gpt-4o-mini` |
+| Ollama (local) | `http://localhost:11434` | `llama3` |
+| vLLM / llama.cpp | your server | any |
+
+Reasoning models (MiniMax-M3, DeepSeek-R1) are handled: thinking
+preambles are stripped, JSON is extracted from fenced or tail blocks,
+and `base_url` is normalized whether or not it ends in `/v1`.
 
 ## CLI surface
 
 ```bash
-webradar init --database ./webradar.db
-webradar status --database ./webradar.db
-webradar ingest-ct-page --database ./webradar.db --input ./ct-page.json
-webradar ingest-github-page --database ./webradar.db --input ./github-page.json
-webradar probe-due --database ./webradar.db --limit 10
-webradar serve --database ./webradar.db --host 127.0.0.1 --port 8000
-webradar listen-certstream --database ./webradar.db --max-messages 100
-webradar poll-certstream-latest --database ./webradar.db --max-probes 20
-webradar poll-github-api --database ./webradar.db --query 'topic:artificial-intelligence'
-```
-
-`probe-due` performs real HTTP requests against domains already
-persisted by an ingestion command. It will not invent targets.
-
-## CertStream feed durability
-
-The default `wss://certstream.calidog.io/` is a public service that
-frequently returns 502 and exposes only a 25-cert snapshot. For a
-durable feed, run a self-hosted
-[certstream-server-rust](https://github.com/reloading01/certstream-server-rust)
-on loopback:
-
-```bash
-brew install reloading01/tap/certstream-server-rust
-mkdir -p /tmp/cs-state
-CERTSTREAM_HOST=127.0.0.1 CERTSTREAM_PORT=8080 \
-  CERTSTREAM_CT_LOG_STATE_FILE=/tmp/cs-state/state.json \
-  certstream-server-rust &
-
-webradar listen-certstream --database ./webradar.db \
-  --url ws://127.0.0.1:8080/ --max-messages 100
-```
-
-If the WebSocket stalls, fall back to the lightweight JSON snapshot:
-
-```bash
-webradar poll-certstream-latest --database ./webradar.db --max-probes 20
+domainhunter init --database ./domainhunter.db
+domainhunter status --database ./domainhunter.db
+domainhunter filter --input domains.json
+domainhunter filter-probe --database ./domainhunter.db --input domains.json
+domainhunter filter-enrich --database ./domainhunter.db --input domains.json --provider openai-compatible ...
+domainhunter discover --database ./domainhunter.db
+domainhunter serve --database ./domainhunter.db --host 127.0.0.1 --port 8000
+domainhunter poll-ct-log --database ./domainhunter.db --max-probes 20
+domainhunter probe-due --database ./domainhunter.db --limit 10
 ```
 
 ## HTTP API
@@ -126,7 +154,7 @@ unless you pass `--host 0.0.0.0`.
 | `POST` | `/v1/candidates/{id}/versions/{v}/decisions` | Idempotent on `request_id`; requires `X-Actor-ID` header |
 | `POST` | `/v1/candidates/{id}/versions/{v}/outreach` | Dry-run by default; emits redacted contact page |
 | `GET` | `/v1/discovery/overview` | Source-event counts + recent candidates |
-| `POST` | `/v1/run/discovery` | One CertStream `latest.json` pass end-to-end |
+| `POST` | `/v1/run/discovery` | One CT log pass end-to-end |
 | `GET` | `/v1/metrics` | Local funnel snapshot (read-only) |
 | `GET` | `/v1/analytics` | Signal→candidate conversion, latency percentiles |
 | `GET` | `/v1/alerts` | Budget-exhausted and runbook hints |
@@ -135,19 +163,22 @@ unless you pass `--host 0.0.0.0`.
 ## Project layout
 
 ```
-src/webradar_v2/
+src/domainhunter/
   api.py        — FastAPI routes + the four-page review console
-  cli.py        — `webradar` command-line entry point
+  cli.py        — `domainhunter` command-line entry point
   crawler/      — bounded L3 same-host crawler
   domain/       — PSL-aware hostname normalization, evidence, candidate model
-  ingest/       — CertStream + GitHub adapters
-  llm/          — fixed-schema LLM output validator (taxonomy-versioned)
+  filter/       — S1 static signals, S2 RDAP age, S3 DNS, funnel pipeline,
+                  S5 batch enrichment (enrich.py)
+  ingest/       — RFC 6962 CT log adapter
+  llm/          — fixed-schema LLM output validator (taxonomy-versioned),
+                  provider-agnostic OpenAI-compatible adapter
   pipeline.py   — L1 → L2 → L3 orchestrator with retry budget
   publish/      — AIKnows draft-sync client + audit log
-  scheduler/    — work-item leases, daily budget ledger, alerts
-  storage/      — append-only SQLite adapter
-tests/          — 320+ deterministic unit tests + CT/GitHub fixtures
-docs/design/    — review console visual + IA spec
+  scheduler/    — discovery daemon, lag monitor, work leases, alerts
+  storage/      — append-only SQLite adapter + first-seen baseline
+tests/          — 360+ deterministic unit tests + CT fixtures
+docs/           — design specs, filter-layer plan, CT poller backlog
 ```
 
 ## Non-goals
@@ -155,9 +186,9 @@ docs/design/    — review console visual + IA spec
 - No production authentication, no public binding configuration.
 - No automatic email. Outreach always requires an explicit human
   approval per recipient.
-- No vendor-specific LLM provider is wired in; the validator is
-  fixed-schema and rejects anything that doesn't already match
-  collected evidence.
+- No vendor-specific LLM provider is wired in; the classifier is a
+  fixed-schema, evidence-restricted adapter that works with any
+  OpenAI-compatible endpoint.
 - No automatic publication. Approved human versions become an
   *outbound draft request* only — never a public post.
 

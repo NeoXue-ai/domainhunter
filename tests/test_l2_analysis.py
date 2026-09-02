@@ -1,4 +1,4 @@
-from webradar_v2.crawler.l2_analysis import extract_rendered_facts
+from domainhunter.crawler.l2_analysis import extract_rendered_facts
 
 
 def test_extracts_headings_ctas_and_pricing_registration_evidence() -> None:

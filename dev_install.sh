@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible local install for webradar-v2.
+# Reproducible local install for domainhunter.
 #
 # Why this exists:
 #   setuptools >= 64 generates the editable marker file
@@ -7,12 +7,12 @@
 #   Python 3.14's site.py calls lstat() and skips any .pth file with the
 #   macOS UF_HIDDEN flag (or the Windows hidden bit). Both `pip install -e .`
 #   and `uv pip install -e .` produce .pth files that carry UF_HIDDEN on
-#   macOS, so the editable install silently fails and `import webradar_v2`
+#   macOS, so the editable install silently fails and `import domainhunter`
 #   raises ModuleNotFoundError.
 #
 # This script runs the editable install, clears UF_HIDDEN from every .pth
-# file in site-packages, writes a companion `webradar-v2.pth` that points
-# at <repo>/src, and patches the generated `webradar` console script to
+# file in site-packages, writes a companion `domainhunter.pth` that points
+# at <repo>/src, and patches the generated `domainhunter` console script to
 # re-strip UF_HIDDEN at every invocation. The on-invocation patch matters:
 # we observed macOS Spotlight re-applying UF_HIDDEN to freshly created .pth
 # files within a second of being cleared, so a single install-time fix is
@@ -23,7 +23,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENV_PY="${VENV_PY:-$REPO_ROOT/.venv/bin/python}"
 SITE_PACKAGES="$("$VENV_PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-PTH_NAME="webradar-v2.pth"
+PTH_NAME="domainhunter.pth"
 
 if [ ! -x "$VENV_PY" ]; then
     echo "error: $VENV_PY is not executable; create the venv first (python3 -m venv .venv)" >&2
@@ -56,15 +56,15 @@ fi
 # Python interpreter. We cannot do the chflags inside Python itself because
 # site.py caches sys.path at startup, before any user code runs.
 if [ "$(uname -s)" = "Darwin" ]; then
-    ENTRY="$REPO_ROOT/.venv/bin/webradar"
-    SHIM="$REPO_ROOT/.venv/bin/_webradar_shim.sh"
-    if [ -f "$ENTRY" ] && { [ ! -f "$SHIM" ] || ! grep -q "webradar-install-fix" "$SHIM"; }; then
+    ENTRY="$REPO_ROOT/.venv/bin/domainhunter"
+    SHIM="$REPO_ROOT/.venv/bin/_domainhunter_shim.sh"
+    if [ -f "$ENTRY" ] && { [ ! -f "$SHIM" ] || ! grep -q "domainhunter-install-fix" "$SHIM"; }; then
         # 1. Write a tiny shim that chflags every .pth in purelib then execs
-        #    `python -m webradar_v2.cli`. The shim is itself chmod +x.
+        #    `python -m domainhunter.cli`. The shim is itself chmod +x.
         SIBLING_PY="$(dirname "$ENTRY")/python"
         cat > "$SHIM" <<EOF
 #!/usr/bin/env bash
-# webradar-install-fix: strip UF_HIDDEN before Python starts so site.py
+# domainhunter-install-fix: strip UF_HIDDEN before Python starts so site.py
 # can read the .pth files. macOS Spotlight re-applies UF_HIDDEN within
 # seconds, so this must run on every invocation, not just at install.
 set -e
@@ -78,7 +78,7 @@ fi
 exec "$SIBLING_PY" "\$@"
 EOF
         chmod +x "$SHIM"
-        # 2. Replace the webradar entry's shebang with the shim.
+        # 2. Replace the domainhunter entry's shebang with the shim.
         #    The real Python interpreter is still passed via the env so the
         #    shim's `exec` reaches it without re-resolving PATH.
         python3 - "$ENTRY" "$SHIM" <<'PYEOF'
@@ -89,14 +89,14 @@ lines = src.splitlines(keepends=True)
 real_shebang = lines[0].rstrip("\n")
 rest = "".join(lines[1:])
 # Drop any prior self-heal prefix from earlier runs.
-if "webradar-install-fix" in rest:
-    rest = rest.split("# webradar-install-fix", 1)[1]
+if "domainhunter-install-fix" in rest:
+    rest = rest.split("# domainhunter-install-fix", 1)[1]
     if rest.lstrip().startswith("\n"):
         rest = rest.lstrip("\n")
-open(entry, "w").write(f"#!/usr/bin/env bash\n# webradar-install-fix\nexec {shim} {real_shebang} \"$@\"\n" + rest)
+open(entry, "w").write(f"#!/usr/bin/env bash\n# domainhunter-install-fix\nexec {shim} {real_shebang} \"$@\"\n" + rest)
 os.chmod(entry, 0o755)
 PYEOF
     fi
 fi
 
-"$VENV_PY" -c 'import webradar_v2; print("ok:", webradar_v2.__file__)'
+"$VENV_PY" -c 'import domainhunter; print("ok:", domainhunter.__file__)'

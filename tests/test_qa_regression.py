@@ -9,16 +9,16 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from webradar_v2.api import create_app
-from webradar_v2.domain.candidates import (
+from domainhunter.api import create_app
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.outreach import OutreachEvent
-from webradar_v2.domain.reviews import ReviewAction, build_review_decision
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.outreach import OutreachEvent
+from domainhunter.domain.reviews import ReviewAction, build_review_decision
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 NOW = datetime(2026, 8, 16, tzinfo=UTC)
@@ -57,7 +57,7 @@ def _seed_approved_human_version(store: SQLiteStore) -> tuple[str, int]:
 
 
 def test_funnel_metrics_exposes_outreach_events_count(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _seed_approved_human_version(store)
 
@@ -94,7 +94,7 @@ def test_funnel_metrics_exposes_outreach_events_count(tmp_path) -> None:
 
 
 def test_metrics_endpoint_exposes_outreach_events_field(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _seed_approved_human_version(store)
     # Second candidate so candidate_versions and outreach_events diverge.

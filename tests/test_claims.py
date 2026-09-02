@@ -1,14 +1,14 @@
 from datetime import UTC, datetime, timedelta
 
-from webradar_v2.domain.claims import build_claim_token, hash_claim_token
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.claims import build_claim_token, hash_claim_token
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 NOW = datetime(2026, 8, 16, tzinfo=UTC)
 
 
 def test_stores_only_a_claim_token_hash_and_redeems_it_once(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate = store.create_candidate("example.com", created_at=NOW)
     raw_token, record = build_claim_token(
         candidate_id=candidate.candidate_id,
@@ -27,7 +27,7 @@ def test_stores_only_a_claim_token_hash_and_redeems_it_once(tmp_path) -> None:
 
 
 def test_revoked_claim_tokens_cannot_be_redeemed(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate = store.create_candidate("example.com", created_at=NOW)
     raw_token, record = build_claim_token(
         candidate_id=candidate.candidate_id,

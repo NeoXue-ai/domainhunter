@@ -1,28 +1,30 @@
-from datetime import UTC, datetime, timedelta
 import sqlite3
+from datetime import UTC, datetime, timedelta
 
-from webradar_v2.domain.events import SourceEvent
-from webradar_v2.domain.exposure import ExposureChannel, ExposureCheck, ExposureStatus
-from webradar_v2.domain.candidates import (
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.outreach import OutreachEvent
-from webradar_v2.domain.reviews import ReasonTag, ReviewAction, build_review_decision
-from webradar_v2.domain.observations import Observation, OutcomeCode
-from webradar_v2.domain.publications import PublicationRecord
-from webradar_v2.domain.review_priority import ReviewPriorityInputs, calculate_review_priority
-from webradar_v2.storage.sqlite import SQLiteStore
-from webradar_v2.publish.aiknows_client import SyncStatus
-
+from domainhunter.domain.events import SourceEvent
+from domainhunter.domain.exposure import ExposureChannel, ExposureCheck, ExposureStatus
+from domainhunter.domain.observations import Observation, OutcomeCode
+from domainhunter.domain.outreach import OutreachEvent
+from domainhunter.domain.publications import PublicationRecord
+from domainhunter.domain.review_priority import (
+    ReviewPriorityInputs,
+    calculate_review_priority,
+)
+from domainhunter.domain.reviews import ReasonTag, ReviewAction, build_review_decision
+from domainhunter.publish.aiknows_client import SyncStatus
+from domainhunter.storage.sqlite import SQLiteStore
 
 OBSERVED_AT = datetime(2026, 8, 16, tzinfo=UTC)
 
 
 def test_appends_source_event_once_and_maps_it_to_the_registrable_domain(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     event = SourceEvent("ct_log", "argon:42", "app.example.co.uk", OBSERVED_AT)
 
     assert store.append_source_event(event, hostname="app.example.co.uk") is True
@@ -32,7 +34,7 @@ def test_appends_source_event_once_and_maps_it_to_the_registrable_domain(tmp_pat
 
 
 def test_appends_source_event_with_issuer_and_persists_it(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     event = SourceEvent(
         "ct_log",
@@ -53,7 +55,7 @@ def test_appends_source_event_with_issuer_and_persists_it(tmp_path) -> None:
 
 
 def test_legacy_database_is_migrated_to_include_issuer_column(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     connection = sqlite3.connect(database)
     try:
         connection.executescript(
@@ -104,7 +106,7 @@ def test_legacy_database_is_migrated_to_include_issuer_column(tmp_path) -> None:
 
 
 def test_appends_observations_without_overwriting_prior_results(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     event = SourceEvent("ct_log", "argon:42", "example.com", OBSERVED_AT)
     store.append_source_event(event, hostname="example.com")
     first = Observation("example.com", OutcomeCode.CONNECT_TIMEOUT, OBSERVED_AT, 1)
@@ -124,7 +126,7 @@ def test_appends_observations_without_overwriting_prior_results(tmp_path) -> Non
 
 
 def test_persists_canonical_url_and_internal_links_with_observations(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     event = SourceEvent("ct_log", "argon:42", "example.com", OBSERVED_AT)
     store.append_source_event(event, hostname="example.com")
     observation = Observation(
@@ -148,7 +150,7 @@ def test_persists_canonical_url_and_internal_links_with_observations(tmp_path) -
 
 
 def test_upgrades_legacy_observations_table_with_canonical_columns(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     event = SourceEvent("ct_log", "argon:42", "example.com", OBSERVED_AT)
     store.append_source_event(event, hostname="example.com")
@@ -167,7 +169,7 @@ def test_upgrades_legacy_observations_table_with_canonical_columns(tmp_path) -> 
 
 
 def test_lists_domains_due_for_the_next_bounded_retry(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     event = SourceEvent("ct_log", "argon:42", "example.com", OBSERVED_AT)
     store.append_source_event(event, hostname="example.com")
     observation = Observation(
@@ -183,7 +185,7 @@ def test_lists_domains_due_for_the_next_bounded_retry(tmp_path) -> None:
 
 
 def test_persists_source_cursor_for_restartable_polling(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
 
     assert store.get_source_cursor("ct_log") is None
     store.set_source_cursor("ct_log", "argon:43")
@@ -192,7 +194,7 @@ def test_persists_source_cursor_for_restartable_polling(tmp_path) -> None:
 
 
 def test_appends_candidate_versions_without_overwriting_model_evidence(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate = store.create_candidate("app.example.com", created_at=OBSERVED_AT)
     replay = store.create_candidate("www.example.com", created_at=OBSERVED_AT.replace(hour=1))
     draft = CandidateVersionDraft(
@@ -224,7 +226,7 @@ def test_appends_candidate_versions_without_overwriting_model_evidence(tmp_path)
 
 
 def test_appends_review_decisions_idempotently_and_keeps_action_history(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate = store.create_candidate("example.com", created_at=OBSERVED_AT)
     draft = CandidateVersionDraft(
         author_kind="rule",
@@ -255,7 +257,7 @@ def test_appends_review_decisions_idempotently_and_keeps_action_history(tmp_path
 
 
 def test_persists_exposure_checks_and_review_priority_snapshots(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate = store.create_candidate("example.com", created_at=OBSERVED_AT)
     check = ExposureCheck(
         channel=ExposureChannel.PRODUCT_HUNT,
@@ -282,7 +284,7 @@ def test_persists_exposure_checks_and_review_priority_snapshots(tmp_path) -> Non
 
 
 def test_appends_publication_attempts_for_reconciliation(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate = store.create_candidate("example.com", created_at=OBSERVED_AT)
     draft = CandidateVersionDraft(
         author_kind="human",
@@ -306,7 +308,7 @@ def test_appends_publication_attempts_for_reconciliation(tmp_path) -> None:
 
 
 def test_reports_a_funnel_snapshot_with_observation_outcomes(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     event = SourceEvent("ct_log", "argon:42", "example.com", OBSERVED_AT)
     store.append_source_event(event, hostname="example.com")
     store.append_observation(
@@ -322,7 +324,7 @@ def test_reports_a_funnel_snapshot_with_observation_outcomes(tmp_path) -> None:
 
 
 def test_appends_outreach_events_and_lists_them_in_chronological_order(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate = store.create_candidate("example.com", created_at=OBSERVED_AT)
     draft = CandidateVersionDraft(
         author_kind="human",
@@ -363,3 +365,36 @@ def test_appends_outreach_events_and_lists_them_in_chronological_order(tmp_path)
 
     events = store.list_outreach_events(candidate.candidate_id)
     assert events == (first, second)
+
+
+def test_mark_seen_tracks_first_seen_history(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    at = datetime(2026, 8, 16, tzinfo=UTC)
+    later = datetime(2026, 8, 17, tzinfo=UTC)
+
+    new_count = store.mark_seen(("a.com", "b.com"), at=at, source="ct")
+    assert new_count == 2
+    assert store.is_seen("a.com") is True
+    assert store.is_seen("b.com") is True
+    assert store.is_seen("c.com") is False
+    assert store.seen_domain_count() == 2
+
+    # Re-marking keeps the first-seen timestamp.
+    store.mark_seen(("a.com",), at=later, source="ct")
+    assert store.seen_domain_count() == 2
+
+
+def test_filter_new_returns_only_never_seen(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    at = datetime(2026, 8, 16, tzinfo=UTC)
+    store.mark_seen(("old.com",), at=at, source="ct")
+
+    fresh = store.filter_new(("old.com", "new.com", "brandnew.io"))
+    assert fresh == ("new.com", "brandnew.io")
+
+
+def test_filter_new_empty_and_unknown(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    assert store.filter_new(()) == ()
+    assert store.filter_new(("x.com", "y.com")) == ("x.com", "y.com")
+    assert store.seen_domain_count() == 0

@@ -2,7 +2,7 @@ import socket
 
 import pytest
 
-from webradar_v2.network_safety import (
+from domainhunter.network_safety import (
     BlockedNetworkTarget,
     resolve_public_addresses,
     validate_public_addresses,

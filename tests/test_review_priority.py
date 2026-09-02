@@ -1,6 +1,6 @@
 import pytest
 
-from webradar_v2.domain.review_priority import ReviewPriorityInputs, calculate_review_priority
+from domainhunter.domain.review_priority import ReviewPriorityInputs, calculate_review_priority
 
 
 def test_calculates_the_versioned_review_priority_breakdown() -> None:

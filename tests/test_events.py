@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from webradar_v2.domain.events import SourceEvent
+from domainhunter.domain.events import SourceEvent
 
 
 def test_same_source_and_event_id_have_same_idempotency_key() -> None:
@@ -14,9 +14,9 @@ def test_same_source_and_event_id_have_same_idempotency_key() -> None:
 def test_different_sources_do_not_collide() -> None:
     observed_at = datetime(2026, 8, 16, tzinfo=UTC)
     ct = SourceEvent("ct_log", "42", "example.com", observed_at)
-    github = SourceEvent("github", "42", "example.com", observed_at)
+    other = SourceEvent("other_source", "42", "example.com", observed_at)
 
-    assert ct.idempotency_key != github.idempotency_key
+    assert ct.idempotency_key != other.idempotency_key
 
 
 def test_source_event_carries_optional_issuer() -> None:

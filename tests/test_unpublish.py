@@ -5,16 +5,16 @@ from datetime import UTC, datetime
 
 import httpx
 
-from webradar_v2.domain.candidates import (
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.reviews import ReviewAction, build_review_decision
-from webradar_v2.publish.aiknows_client import AIKnowsClient, SyncStatus
-from webradar_v2.publish.service import PublicationNotApproved, PublicationService
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.reviews import ReviewAction, build_review_decision
+from domainhunter.publish.aiknows_client import AIKnowsClient, SyncStatus
+from domainhunter.publish.service import PublicationNotApproved, PublicationService
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 NOW = datetime(2026, 8, 17, tzinfo=UTC)
@@ -68,7 +68,7 @@ def test_aiknows_unpublish_deletes_the_external_draft_and_returns_revoked() -> N
 
         assert result.status is SyncStatus.REVOKED
         assert requests[0].method == "DELETE"
-        assert requests[0].url.path == "/v1/webradar/drafts/aik-42"
+        assert requests[0].url.path == "/v1/domainhunter/drafts/aik-42"
 
     asyncio.run(run())
 
@@ -94,7 +94,7 @@ def test_aiknows_unpublish_marks_timeout_as_reconciliation_required() -> None:
 
 
 def test_publication_service_unpublish_calls_aiknows_and_appends_record(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate_id, version = _seed_human_approved_version(store)
 
     class FakeClient:
@@ -103,7 +103,7 @@ def test_publication_service_unpublish_calls_aiknows_and_appends_record(tmp_path
 
         async def unpublish(self, external_entry_id, external_version):
             self.unpublish_calls.append((external_entry_id, external_version))
-            from webradar_v2.publish.aiknows_client import SyncResult
+            from domainhunter.publish.aiknows_client import SyncResult
             return SyncResult(
                 status=SyncStatus.REVOKED,
                 external_entry_id=external_entry_id,
@@ -133,7 +133,7 @@ def test_publication_service_unpublish_calls_aiknows_and_appends_record(tmp_path
 
 
 def test_publication_service_unpublish_requires_approved_human_version(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     # Seed without approval
     candidate = store.create_candidate("example.com", created_at=NOW)
     version = store.append_candidate_version(
@@ -174,12 +174,12 @@ def test_publication_service_unpublish_requires_approved_human_version(tmp_path)
 
 def test_publication_service_unpublish_with_reconciliation_is_recorded(tmp_path) -> None:
     """A timeout during unpublish is recorded as RECONCILIATION_REQUIRED."""
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate_id, version = _seed_human_approved_version(store)
 
     class ReconClient:
         async def unpublish(self, external_entry_id, external_version):
-            from webradar_v2.publish.aiknows_client import SyncResult
+            from domainhunter.publish.aiknows_client import SyncResult
             return SyncResult(
                 status=SyncStatus.RECONCILIATION_REQUIRED,
                 detail="timeout",
@@ -205,9 +205,9 @@ def test_publication_service_unpublish_with_reconciliation_is_recorded(tmp_path)
 def test_api_unpublish_endpoint_returns_revoked_status(tmp_path) -> None:
     from fastapi.testclient import TestClient
 
-    from webradar_v2.api import create_app
+    from domainhunter.api import create_app
 
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _seed_human_approved_version(store)
 

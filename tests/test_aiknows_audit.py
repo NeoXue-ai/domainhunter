@@ -6,9 +6,9 @@ from datetime import UTC, datetime
 
 import httpx
 
-from webradar_v2.domain.audit import AIKnowsAuditEntry
-from webradar_v2.publish.aiknows_client import AIKnowsClient
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.audit import AIKnowsAuditEntry
+from domainhunter.publish.aiknows_client import AIKnowsClient
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 NOW = datetime(2026, 8, 17, tzinfo=UTC)
@@ -23,10 +23,10 @@ def _payload() -> dict[str, object]:
 
 
 def test_append_audit_writes_one_row_per_call(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     entry = AIKnowsAuditEntry(
         method="POST",
-        url="/v1/webradar/drafts",
+        url="/v1/domainhunter/drafts",
         status_code=201,
         latency_ms=42.0,
         candidate_id="candidate-1",
@@ -43,12 +43,12 @@ def test_append_audit_writes_one_row_per_call(tmp_path) -> None:
 
 
 def test_list_audit_filters_by_candidate_id(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     for cid, version in (("candidate-1", 1), ("candidate-1", 2), ("candidate-2", 1)):
         store.append_audit(
             AIKnowsAuditEntry(
                 method="POST",
-                url="/v1/webradar/drafts",
+                url="/v1/domainhunter/drafts",
                 status_code=201,
                 latency_ms=10.0,
                 candidate_id=cid,
@@ -77,7 +77,7 @@ def test_token_bucket_sleeps_between_consecutive_calls() -> None:
             transport=httpx.MockTransport(handler),
             requests_per_second=5.0,  # 200ms interval
         ) as client:
-            from webradar_v2.domain.candidates import (
+            from domainhunter.domain.candidates import (
                 Candidate,
                 CandidateOutcome,
                 CandidateVersion,
@@ -140,15 +140,15 @@ def test_rate_limit_does_not_apply_when_unset() -> None:
 def test_aiknows_audit_endpoint_returns_recent_rows_for_a_candidate(tmp_path) -> None:
     from fastapi.testclient import TestClient
 
-    from webradar_v2.api import create_app
+    from domainhunter.api import create_app
 
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     for i in range(3):
         store.append_audit(
             AIKnowsAuditEntry(
                 method="POST",
-                url="/v1/webradar/drafts",
+                url="/v1/domainhunter/drafts",
                 status_code=201,
                 latency_ms=10.0 + i,
                 candidate_id="candidate-1",
@@ -159,7 +159,7 @@ def test_aiknows_audit_endpoint_returns_recent_rows_for_a_candidate(tmp_path) ->
     store.append_audit(
         AIKnowsAuditEntry(
             method="POST",
-            url="/v1/webradar/drafts",
+            url="/v1/domainhunter/drafts",
             status_code=201,
             latency_ms=99.0,
             candidate_id="candidate-2",

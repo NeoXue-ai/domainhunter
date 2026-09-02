@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from webradar_v2.ingest.ct_events import build_ct_events, extract_certificate_hostnames
-from webradar_v2.ingest.ct_poller import CTCertificate, CTPage, CTPoller
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.ingest.ct_events import build_ct_events, extract_certificate_hostnames
+from domainhunter.ingest.ct_poller import CTCertificate, CTPage, CTPoller
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "ct"
@@ -38,7 +38,7 @@ def test_renewal_fixture_appends_once_and_replay_is_noop(tmp_path) -> None:
     fixture = _load("renewal.json")
 
     async def run() -> None:
-        store = SQLiteStore(tmp_path / "webradar.db")
+        store = SQLiteStore(tmp_path / "domainhunter.db")
         poller = CTPoller(store=store, fetch_page=lambda cursor: _page_async(_make_entries(fixture), None))
 
         first = await poller.poll()
@@ -64,7 +64,7 @@ def test_wildcard_fixture_appends_one_event_per_hostname(tmp_path) -> None:
     fixture = _load("wildcard.json")
 
     async def run() -> None:
-        store = SQLiteStore(tmp_path / "webradar.db")
+        store = SQLiteStore(tmp_path / "domainhunter.db")
         poller = CTPoller(store=store, fetch_page=lambda cursor: _page_async(_make_entries(fixture), None))
         result = await poller.poll()
 
@@ -78,7 +78,7 @@ def test_duplicate_fixture_is_idempotent_across_replays(tmp_path) -> None:
     fixture = _load("duplicate.json")
 
     async def run() -> None:
-        store = SQLiteStore(tmp_path / "webradar.db")
+        store = SQLiteStore(tmp_path / "domainhunter.db")
         poller = CTPoller(store=store, fetch_page=lambda cursor: _page_async(_make_entries(fixture), None))
 
         first = await poller.poll()
@@ -105,7 +105,7 @@ def test_malformed_fixture_skips_bad_entries_without_crashing(tmp_path) -> None:
     fixture = _load("malformed.json")
 
     async def run() -> None:
-        store = SQLiteStore(tmp_path / "webradar.db")
+        store = SQLiteStore(tmp_path / "domainhunter.db")
         events_seen = 0
         for entry in fixture["entries"]:
             if not entry["source_event_id"]:

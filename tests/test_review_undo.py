@@ -4,18 +4,18 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
-from webradar_v2.api import create_app
-from webradar_v2.domain.candidates import (
+from domainhunter.api import create_app
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.reviews import (
+from domainhunter.domain.reviews import (
     ReviewAction,
     build_review_decision,
 )
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 NOW = datetime(2026, 8, 17, tzinfo=UTC)
@@ -54,7 +54,7 @@ def test_undo_action_is_a_first_class_review_action() -> None:
 
 
 def test_revoke_soft_revokes_an_active_review_decision(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _approved_candidate(store)
     decision = build_review_decision(
@@ -82,7 +82,7 @@ def test_revoke_soft_revokes_an_active_review_decision(tmp_path) -> None:
 
 
 def test_revoke_is_idempotent_for_an_already_revoked_decision(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _approved_candidate(store)
     decision = build_review_decision(
@@ -113,7 +113,7 @@ def test_revoke_is_idempotent_for_an_already_revoked_decision(tmp_path) -> None:
 
 
 def test_revoke_raises_when_decision_id_is_unknown(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
 
     with_test = store.revoke_review_decision(
         "missing-decision",
@@ -128,7 +128,7 @@ def test_legacy_review_decisions_table_is_migrated_with_revocation_columns(tmp_p
     """An older database without revoked_at/revoked_by/revoke_reason must still open."""
     import sqlite3
 
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     connection = sqlite3.connect(database)
     try:
         connection.executescript(
@@ -227,7 +227,7 @@ def test_legacy_review_decisions_table_is_migrated_with_revocation_columns(tmp_p
 
 
 def test_api_revoke_endpoint_returns_revoked_flag_with_actor_header(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _approved_candidate(store)
     decision = build_review_decision(
@@ -255,7 +255,7 @@ def test_api_revoke_endpoint_returns_revoked_flag_with_actor_header(tmp_path) ->
 
 
 def test_api_revoke_requires_actor_header(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _approved_candidate(store)
     decision = build_review_decision(

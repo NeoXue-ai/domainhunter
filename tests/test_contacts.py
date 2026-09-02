@@ -1,4 +1,4 @@
-from webradar_v2.domain.contacts import extract_public_contacts
+from domainhunter.domain.contacts import extract_public_contacts
 
 
 def test_extracts_unique_public_contact_addresses_and_redacts_page_text() -> None:

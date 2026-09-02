@@ -1,18 +1,18 @@
 [project]
-name = "webradar-v2"
+name = "domainhunter"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28",
     "fastapi>=0.115",
     "publicsuffix2>=2.20191221",
-    "websockets>=15",
     "playwright>=1.50",
     "uvicorn>=0.30",
+    "cryptography>=42",
 ]
 
 [project.scripts]
-webradar = "webradar_v2.cli:main"
+domainhunter = "domainhunter.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=9.0"]

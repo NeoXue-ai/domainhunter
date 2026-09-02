@@ -12,8 +12,8 @@ import asyncio
 
 import httpx
 
-from webradar_v2.crawler.http_probe import HTTPProbe
-from webradar_v2.domain.observations import OutcomeCode
+from domainhunter.crawler.http_probe import HTTPProbe
+from domainhunter.domain.observations import OutcomeCode
 
 from tests.support.fake_http import FakeHTTPServer
 

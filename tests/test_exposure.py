@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from webradar_v2.domain.exposure import ExposureChannel, ExposureCheck, ExposureStatus
+from domainhunter.domain.exposure import ExposureChannel, ExposureCheck, ExposureStatus
 
 
 OBSERVED_AT = datetime(2026, 8, 16, tzinfo=UTC)

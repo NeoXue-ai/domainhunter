@@ -2,7 +2,7 @@
 
 The poller is fed by a hand-rolled fake fetcher (no httpx), so these tests
 prove the wiring between ``CTPoller`` → ``SQLiteStore`` →
-``WebRadarPipeline.probe_domain`` without touching the real network.
+``DomainHunterPipeline.probe_domain`` without touching the real network.
 
 The probe is a fake that returns canned ``L1Analysis`` values per hostname
 so we can deterministically exercise both the publishable and the
@@ -13,14 +13,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Mapping
 
-from webradar_v2.crawler.http_probe import ProbeResult
-from webradar_v2.crawler.l1_analysis import L1Analysis
-from webradar_v2.domain.observations import OutcomeCode
-from webradar_v2.ingest.ct_events import build_ct_events
-from webradar_v2.ingest.ct_orchestrator import CTIngestOrchestrator
-from webradar_v2.ingest.ct_poller import CTCertificate, CTPage, CTPoller
-from webradar_v2.pipeline import WebRadarPipeline
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.crawler.http_probe import ProbeResult
+from domainhunter.crawler.l1_analysis import L1Analysis
+from domainhunter.domain.observations import OutcomeCode
+from domainhunter.ingest.ct_events import build_ct_events
+from domainhunter.ingest.ct_orchestrator import CTIngestOrchestrator
+from domainhunter.ingest.ct_poller import CTCertificate, CTPage, CTPoller
+from domainhunter.pipeline import DomainHunterPipeline
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 _OBSERVED = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
@@ -106,7 +106,7 @@ def _run(coro):
 
 
 def test_poll_then_probe_creates_publishable_candidate(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     page = CTPage(
         entries=(
             _cert("c1", "nova-ai.com"),
@@ -121,7 +121,7 @@ def test_poll_then_probe_creates_publishable_candidate(tmp_path) -> None:
             "brightcanvas.io": _ai_publishable("brightcanvas.io"),
         }
     )
-    pipeline = WebRadarPipeline(store=store, probe=probe)  # type: ignore[arg-type]
+    pipeline = DomainHunterPipeline(store=store, probe=probe)  # type: ignore[arg-type]
     orchestrator = CTIngestOrchestrator(
         store=store, poller=poller, pipeline=pipeline, probe_limit=10
     )
@@ -146,14 +146,14 @@ def test_poll_then_probe_creates_publishable_candidate(tmp_path) -> None:
 
 
 def test_respects_probe_limit(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     page = CTPage(
         entries=tuple(_cert(f"c{i}", f"site-{i}.ai") for i in range(5)),
         next_cursor="c4",
     )
     poller = _make_poller(store, (page,))
     probe = _FakeProbe({})
-    pipeline = WebRadarPipeline(store=store, probe=probe)  # type: ignore[arg-type]
+    pipeline = DomainHunterPipeline(store=store, probe=probe)  # type: ignore[arg-type]
     orchestrator = CTIngestOrchestrator(
         store=store, poller=poller, pipeline=pipeline, probe_limit=3
     )
@@ -168,14 +168,14 @@ def test_respects_probe_limit(tmp_path) -> None:
 
 
 def test_idempotent_on_replay(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     page = CTPage(
         entries=(_cert("c1", "nova-ai.com"),),
         next_cursor="c1",
     )
     poller = _make_poller(store, (page, page))
     probe = _FakeProbe({"nova-ai.com": _ai_publishable("nova-ai.com")})
-    pipeline = WebRadarPipeline(store=store, probe=probe)  # type: ignore[arg-type]
+    pipeline = DomainHunterPipeline(store=store, probe=probe)  # type: ignore[arg-type]
     orchestrator = CTIngestOrchestrator(
         store=store, poller=poller, pipeline=pipeline, probe_limit=10
     )
@@ -194,7 +194,7 @@ def test_idempotent_on_replay(tmp_path) -> None:
 
 
 def test_skips_domains_with_no_candidate(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     page = CTPage(
         entries=(
             _cert("c1", "with-content.com"),
@@ -209,7 +209,7 @@ def test_skips_domains_with_no_candidate(tmp_path) -> None:
             "no-content.com": _empty_success("no-content.com"),
         }
     )
-    pipeline = WebRadarPipeline(store=store, probe=probe)  # type: ignore[arg-type]
+    pipeline = DomainHunterPipeline(store=store, probe=probe)  # type: ignore[arg-type]
     orchestrator = CTIngestOrchestrator(
         store=store, poller=poller, pipeline=pipeline, probe_limit=10
     )
@@ -223,10 +223,10 @@ def test_skips_domains_with_no_candidate(tmp_path) -> None:
 
 
 def test_empty_page_returns_zero_summary(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     poller = _make_poller(store, (CTPage(entries=(), next_cursor=None),))
     probe = _FakeProbe({})
-    pipeline = WebRadarPipeline(store=store, probe=probe)  # type: ignore[arg-type]
+    pipeline = DomainHunterPipeline(store=store, probe=probe)  # type: ignore[arg-type]
     orchestrator = CTIngestOrchestrator(
         store=store, poller=poller, pipeline=pipeline, probe_limit=10
     )

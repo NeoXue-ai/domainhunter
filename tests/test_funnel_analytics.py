@@ -12,19 +12,19 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from webradar_v2.api import create_app
-from webradar_v2.cli import main as cli_main
-from webradar_v2.domain.candidates import (
+from domainhunter.api import create_app
+from domainhunter.cli import main as cli_main
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.events import SourceEvent
-from webradar_v2.domain.metrics import FunnelAnalytics, percentile
-from webradar_v2.domain.reviews import ReviewAction, build_review_decision
-from webradar_v2.domain.work_queue import WorkStage
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.events import SourceEvent
+from domainhunter.domain.metrics import FunnelAnalytics, percentile
+from domainhunter.domain.reviews import ReviewAction, build_review_decision
+from domainhunter.domain.work_queue import WorkStage
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 T0 = datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC)
@@ -77,8 +77,8 @@ def _seed_candidate(
         )
         store.append_review_decision(decision)
     if requested_at is not None:
-        from webradar_v2.domain.publications import PublicationRecord
-        from webradar_v2.publish.aiknows_client import SyncResult, SyncStatus
+        from domainhunter.domain.publications import PublicationRecord
+        from domainhunter.publish.aiknows_client import SyncResult, SyncStatus
 
         sync = SyncResult(
             status=SyncStatus.SYNCED,

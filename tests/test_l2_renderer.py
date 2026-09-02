@@ -1,8 +1,8 @@
 import asyncio
 from contextlib import asynccontextmanager
 
-from webradar_v2.crawler.l2_renderer import L2Renderer
-from webradar_v2.domain.observations import OutcomeCode
+from domainhunter.crawler.l2_renderer import L2Renderer
+from domainhunter.domain.observations import OutcomeCode
 
 
 class FakePage:

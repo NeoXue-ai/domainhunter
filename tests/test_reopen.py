@@ -2,12 +2,12 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from webradar_v2 import cli
-from webradar_v2.api import create_app
-from webradar_v2.domain.events import SourceEvent
-from webradar_v2.domain.observations import Observation, OutcomeCode
-from webradar_v2.domain.reopens import build_reopen_event
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter import cli
+from domainhunter.api import create_app
+from domainhunter.domain.events import SourceEvent
+from domainhunter.domain.observations import Observation, OutcomeCode
+from domainhunter.domain.reopens import build_reopen_event
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 OBSERVED_AT = datetime(2026, 8, 16, tzinfo=UTC)
@@ -71,7 +71,7 @@ def _post_reopen(
 
 
 def test_reopen_terminal_content_insufficient_succeeds(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, _ = _seed_terminal_candidate(
         store, outcome=OutcomeCode.CONTENT_INSUFFICIENT, attempts=4
@@ -93,7 +93,7 @@ def test_reopen_terminal_content_insufficient_succeeds(tmp_path) -> None:
 
 
 def test_reopen_non_terminal_returns_409(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id = _seed_success_candidate(store)
     client = TestClient(create_app(database))
@@ -104,7 +104,7 @@ def test_reopen_non_terminal_returns_409(tmp_path) -> None:
 
 
 def test_reopen_unknown_candidate_returns_404(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     client = TestClient(create_app(database))
 
     response = _post_reopen(client, "missing-candidate-id")
@@ -113,7 +113,7 @@ def test_reopen_unknown_candidate_returns_404(tmp_path) -> None:
 
 
 def test_reopen_unknown_trigger_source_returns_422(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, _ = _seed_terminal_candidate(
         store, outcome=OutcomeCode.HTTP_4XX, attempts=4
@@ -126,7 +126,7 @@ def test_reopen_unknown_trigger_source_returns_422(tmp_path) -> None:
 
 
 def test_reopen_unknown_outcome_returns_422(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, _ = _seed_terminal_candidate(
         store, outcome=OutcomeCode.HTTP_4XX, attempts=4
@@ -139,7 +139,7 @@ def test_reopen_unknown_outcome_returns_422(tmp_path) -> None:
 
 
 def test_reopen_idempotent_by_request_id(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, _ = _seed_terminal_candidate(
         store, outcome=OutcomeCode.HTTP_4XX, attempts=4
@@ -159,7 +159,7 @@ def test_reopen_idempotent_by_request_id(tmp_path) -> None:
 
 
 def test_reopen_appends_fresh_observation_resets_retry(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, _ = _seed_terminal_candidate(
         store, outcome=OutcomeCode.REDIRECT_LOOP, attempts=5
@@ -177,7 +177,7 @@ def test_reopen_appends_fresh_observation_resets_retry(tmp_path) -> None:
 
 
 def test_list_reopen_events_returns_in_order(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, _ = _seed_terminal_candidate(
         store, outcome=OutcomeCode.CONTENT_INSUFFICIENT, attempts=4
@@ -212,7 +212,7 @@ def test_list_reopen_events_returns_in_order(tmp_path) -> None:
 
 
 def test_cli_reopen_subcommand(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, _ = _seed_terminal_candidate(
         store, outcome=OutcomeCode.HTTP_4XX, attempts=4

@@ -1,5 +1,5 @@
-from webradar_v2.crawler.l1_analysis import analyze_http_document
-from webradar_v2.domain.observations import OutcomeCode
+from domainhunter.crawler.l1_analysis import analyze_http_document
+from domainhunter.domain.observations import OutcomeCode
 
 
 def test_extracts_product_metadata_from_successful_html() -> None:

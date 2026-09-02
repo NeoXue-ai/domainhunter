@@ -1,4 +1,4 @@
-from webradar_v2 import __version__
+from domainhunter import __version__
 
 
 def test_package_exposes_initial_version() -> None:

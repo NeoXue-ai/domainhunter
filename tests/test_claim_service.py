@@ -2,15 +2,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from webradar_v2.domain.candidates import (
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.reviews import ReviewAction, build_review_decision
-from webradar_v2.publish.claim_service import ClaimNotApproved, ClaimService
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.reviews import ReviewAction, build_review_decision
+from domainhunter.publish.claim_service import ClaimNotApproved, ClaimService
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 NOW = datetime(2026, 8, 16, tzinfo=UTC)
@@ -34,7 +34,7 @@ def _human_version(store: SQLiteStore):
 
 
 def test_issues_claim_token_only_for_an_approved_human_version(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate, version = _human_version(store)
     service = ClaimService(store=store)
 

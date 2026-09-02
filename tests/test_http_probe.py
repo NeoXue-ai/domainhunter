@@ -4,8 +4,8 @@ import socket
 import httpx
 import pytest
 
-from webradar_v2.crawler.http_probe import HTTPProbe
-from webradar_v2.domain.observations import OutcomeCode
+from domainhunter.crawler.http_probe import HTTPProbe
+from domainhunter.domain.observations import OutcomeCode
 
 
 async def _public_resolver(hostname: str) -> tuple[str, ...]:

@@ -1,1 +1,1 @@
-"""Test support package for WebRadar v2."""
+"""Test support package for DomainHunter."""

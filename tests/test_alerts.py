@@ -5,21 +5,21 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
-from webradar_v2 import cli
-from webradar_v2.api import create_app
-from webradar_v2.domain.alerts import Alert, AlertKind, AlertSeverity
-from webradar_v2.domain.audit import AIKnowsAuditEntry
-from webradar_v2.domain.candidates import (
+from domainhunter import cli
+from domainhunter.api import create_app
+from domainhunter.domain.alerts import Alert, AlertKind, AlertSeverity
+from domainhunter.domain.audit import AIKnowsAuditEntry
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.events import SourceEvent
-from webradar_v2.domain.observations import Observation, OutcomeCode
-from webradar_v2.domain.work_queue import WorkStage
-from webradar_v2.scheduler.alerts import AlertEngine
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.events import SourceEvent
+from domainhunter.domain.observations import Observation, OutcomeCode
+from domainhunter.domain.work_queue import WorkStage
+from domainhunter.scheduler.alerts import AlertEngine
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 NOW = datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC)
@@ -120,7 +120,7 @@ def _run(engine: AlertEngine):
 
 
 def test_append_alert_is_idempotent_by_alert_id(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     alert = Alert(
         alert_id="abc123",
         kind=AlertKind.ZERO_INPUT,
@@ -143,7 +143,7 @@ def test_append_alert_is_idempotent_by_alert_id(tmp_path) -> None:
 
 def test_alert_idempotent_within_window(tmp_path) -> None:
     """Re-running AlertEngine twice must not duplicate the same fingerprint."""
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     _seed_source_events(store, count=20, observed_at=_hour_ago(3.0))
     engine = _make_engine(store)
 
@@ -161,7 +161,7 @@ def test_alert_idempotent_within_window(tmp_path) -> None:
 
 
 def test_zero_input_emits_critical_when_sources_dry_up(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     _seed_source_events(store, count=8, observed_at=_hour_ago(3.0))  # baseline
     engine = _make_engine(store)
 
@@ -174,7 +174,7 @@ def test_zero_input_emits_critical_when_sources_dry_up(tmp_path) -> None:
 
 
 def test_baseline_drift_warns_when_rate_drops_below_half(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     # Seed ~120 events across 24h (5/h), but with all events strictly older
     # than the 1h window so recent_rate is 0.
     for hour in range(0, 24, 2):
@@ -190,7 +190,7 @@ def test_baseline_drift_warns_when_rate_drops_below_half(tmp_path) -> None:
 
 
 def test_queue_backlog_warns_after_1h_of_stuck_work(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     store.enqueue_work(WorkStage.L1, "stuck-1", scheduled_at=_hour_ago(2.0))
     store.enqueue_work(WorkStage.L1, "stuck-2", scheduled_at=_hour_ago(3.0))
     engine = _make_engine(store)
@@ -204,7 +204,7 @@ def test_queue_backlog_warns_after_1h_of_stuck_work(tmp_path) -> None:
 
 
 def test_budget_exhausted_when_80pct_consumed(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     store.reserve_budget(
         WorkStage.L1,
         units=9.0,
@@ -227,7 +227,7 @@ def test_budget_exhausted_when_80pct_consumed(tmp_path) -> None:
 
 
 def test_error_rate_spike_when_5xx_doubles(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     # 24h baseline: 5% error rate (1/20).
     baseline_outcomes: list[tuple[str, OutcomeCode]] = []
     for index in range(20):
@@ -254,7 +254,7 @@ def test_error_rate_spike_when_5xx_doubles(tmp_path) -> None:
 
 
 def test_ssrf_interception_spike_when_blocked_doubles(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     # Baseline: 1 blocked out of 100.
     baseline_outcomes = [
         ("base.com", OutcomeCode.BLOCKED_SSRF if index == 0 else OutcomeCode.SUCCESS)
@@ -281,7 +281,7 @@ def test_ssrf_interception_spike_when_blocked_doubles(tmp_path) -> None:
 
 
 def test_schema_failure_on_llm_valid_but_not_ready(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     _make_llm_version(
         store, outcome=CandidateOutcome.VALID_BUT_NOT_READY, created_at=_hour_ago(0.2)
     )
@@ -297,12 +297,12 @@ def test_schema_failure_on_llm_valid_but_not_ready(tmp_path) -> None:
 
 
 def test_external_sync_failure_warns_on_audit_activity(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate_id = "candidate-external"
     store.append_audit(
         AIKnowsAuditEntry(
             method="POST",
-            url="/v1/webradar/drafts",
+            url="/v1/domainhunter/drafts",
             status_code=503,
             latency_ms=100.0,
             candidate_id=candidate_id,
@@ -329,7 +329,7 @@ def test_external_sync_failure_warns_on_audit_activity(tmp_path) -> None:
 
 
 def test_api_lists_alerts(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     store.append_alert(
         Alert(
@@ -359,7 +359,7 @@ def test_api_lists_alerts(tmp_path) -> None:
 
 
 def test_api_lists_alerts_since_filter(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     store.append_alert(
         Alert(
@@ -400,7 +400,7 @@ def test_api_lists_alerts_since_filter(tmp_path) -> None:
 
 
 def test_api_get_runbook_returns_200_and_404(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     client = TestClient(create_app(database))
 
     ok = client.get("/v1/runbooks/rb.zero_input")
@@ -415,7 +415,7 @@ def test_api_get_runbook_returns_200_and_404(tmp_path) -> None:
 
 
 def test_api_lists_runbooks_summary(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     response = TestClient(create_app(database)).get("/v1/runbooks")
 
     assert response.status_code == 200
@@ -427,7 +427,7 @@ def test_api_lists_runbooks_summary(tmp_path) -> None:
 
 
 def test_cli_alerts_subcommand(tmp_path, capsys) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     store.append_alert(
         Alert(

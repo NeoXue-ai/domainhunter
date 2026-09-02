@@ -1,7 +1,7 @@
 """Contract tests for the curated spec §14 runbook registry."""
 
-from webradar_v2.domain.alerts import AlertKind, Runbook
-from webradar_v2.scheduler.runbooks import (
+from domainhunter.domain.alerts import AlertKind, Runbook
+from domainhunter.scheduler.runbooks import (
     get_runbook,
     get_runbook_by_id,
     list_runbooks,

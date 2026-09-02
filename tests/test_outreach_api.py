@@ -2,15 +2,15 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from webradar_v2.api import create_app
-from webradar_v2.domain.candidates import (
+from domainhunter.api import create_app
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.reviews import ReviewAction, build_review_decision
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.reviews import ReviewAction, build_review_decision
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 NOW = datetime(2026, 8, 16, tzinfo=UTC)
@@ -74,7 +74,7 @@ def _rule_version(store: SQLiteStore) -> tuple[str, int]:
 
 
 def test_outreach_requires_actor_id(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _approved_human_version(store)
     client = TestClient(create_app(database))
@@ -88,7 +88,7 @@ def test_outreach_requires_actor_id(tmp_path) -> None:
 
 
 def test_outreach_requires_approval(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _approved_human_version(store)
     # Revoke the approval before recording the conflicting reject; spec §11
@@ -123,7 +123,7 @@ def test_outreach_requires_approval(tmp_path) -> None:
 
 
 def test_outreach_requires_human_version(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _rule_version(store)
     store.append_review_decision(
@@ -148,7 +148,7 @@ def test_outreach_requires_human_version(tmp_path) -> None:
 
 
 def test_outreach_dry_run_returns_preview_without_persisting_token(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _approved_human_version(store)
     fetcher = FakeContactPageFetcher(
@@ -181,7 +181,7 @@ def test_outreach_dry_run_returns_preview_without_persisting_token(tmp_path) -> 
 
 
 def test_outreach_real_run_persists_claim_tokens_and_outreach_event(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _approved_human_version(store)
     fetcher = FakeContactPageFetcher(
@@ -213,7 +213,7 @@ def test_outreach_real_run_persists_claim_tokens_and_outreach_event(tmp_path) ->
 
 
 def test_outreach_extracts_and_redacts_contacts_from_source_url(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate_id, version = _approved_human_version(store)
     fetcher = FakeContactPageFetcher(

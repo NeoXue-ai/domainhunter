@@ -1,8 +1,8 @@
 import asyncio
 from datetime import UTC, datetime
 
-from webradar_v2.ingest.ct_poller import CTCertificate, CTPage, CTPoller
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.ingest.ct_poller import CTCertificate, CTPage, CTPoller
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 OBSERVED_AT = datetime(2026, 8, 16, tzinfo=UTC)
@@ -31,7 +31,7 @@ def test_polls_ct_pages_with_cursor_and_idempotent_event_counts(tmp_path) -> Non
         return page
 
     async def run() -> None:
-        store = SQLiteStore(tmp_path / "webradar.db")
+        store = SQLiteStore(tmp_path / "domainhunter.db")
         poller = CTPoller(store=store, fetch_page=fetch)
 
         first = await poller.poll()

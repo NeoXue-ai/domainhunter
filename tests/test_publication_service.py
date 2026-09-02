@@ -3,16 +3,16 @@ from datetime import UTC, datetime
 
 import pytest
 
-from webradar_v2.domain.candidates import (
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.reviews import ReviewAction, build_review_decision
-from webradar_v2.publish.aiknows_client import SyncResult, SyncStatus
-from webradar_v2.publish.service import PublicationNotApproved, PublicationService
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.reviews import ReviewAction, build_review_decision
+from domainhunter.publish.aiknows_client import SyncResult, SyncStatus
+from domainhunter.publish.service import PublicationNotApproved, PublicationService
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 OBSERVED_AT = datetime(2026, 8, 16, tzinfo=UTC)
@@ -50,7 +50,7 @@ def _human_version(store: SQLiteStore):
 
 
 def test_rejects_unapproved_or_nonhuman_versions_without_calling_aiknows(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate, version = _human_version(store)
     client = FakeAIKnowsClient()
 
@@ -66,7 +66,7 @@ def test_rejects_unapproved_or_nonhuman_versions_without_calling_aiknows(tmp_pat
 
 
 def test_syncs_an_approved_human_version_and_appends_the_external_result(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate, version = _human_version(store)
     store.append_review_decision(
         build_review_decision(

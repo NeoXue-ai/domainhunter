@@ -2,18 +2,18 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from webradar_v2.api import create_app
-from webradar_v2.domain.candidates import (
+from domainhunter.api import create_app
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.events import SourceEvent
-from webradar_v2.domain.observations import Observation, OutcomeCode
-from webradar_v2.domain.reviews import ReasonTag
-from webradar_v2.domain.review_priority import ReviewPriorityInputs, calculate_review_priority
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.events import SourceEvent
+from domainhunter.domain.observations import Observation, OutcomeCode
+from domainhunter.domain.reviews import ReasonTag
+from domainhunter.domain.review_priority import ReviewPriorityInputs, calculate_review_priority
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 OBSERVED_AT = datetime(2026, 8, 16, tzinfo=UTC)
@@ -42,7 +42,7 @@ def _reviewable_candidate(store: SQLiteStore):
 
 
 def test_lists_a_reviewable_candidate_with_its_evidence_and_score(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate, version = _reviewable_candidate(store)
 
@@ -57,7 +57,7 @@ def test_lists_a_reviewable_candidate_with_its_evidence_and_score(tmp_path) -> N
 
 
 def test_review_queue_projects_canonical_and_internal_links_when_present(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate, _version = _reviewable_candidate(store)
     event = SourceEvent("ct_log", "argon:43", "example.com", OBSERVED_AT)
@@ -87,7 +87,7 @@ def test_review_queue_projects_canonical_and_internal_links_when_present(tmp_pat
 
 
 def test_review_queue_omits_canonical_and_internal_links_when_absent(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     _reviewable_candidate(SQLiteStore(database))
 
     response = TestClient(create_app(database)).get("/v1/review-queue")
@@ -99,7 +99,7 @@ def test_review_queue_omits_canonical_and_internal_links_when_absent(tmp_path) -
 
 
 def test_appends_idempotent_review_decisions_with_an_explicit_actor(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate, version = _reviewable_candidate(store)
     client = TestClient(create_app(database))
@@ -128,7 +128,7 @@ def test_appends_idempotent_review_decisions_with_an_explicit_actor(tmp_path) ->
 
 
 def test_serves_a_local_review_console_with_keyboard_actions(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate, _version = _reviewable_candidate(store)
 
@@ -142,7 +142,7 @@ def test_serves_a_local_review_console_with_keyboard_actions(tmp_path) -> None:
 
 
 def test_exposes_an_operational_funnel_snapshot(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     _reviewable_candidate(SQLiteStore(database))
 
     response = TestClient(create_app(database)).get("/v1/metrics")
@@ -153,7 +153,7 @@ def test_exposes_an_operational_funnel_snapshot(tmp_path) -> None:
 
 
 def test_appends_decision_with_known_reason_tag_values(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate, version = _reviewable_candidate(store)
     client = TestClient(create_app(database))
@@ -174,7 +174,7 @@ def test_appends_decision_with_known_reason_tag_values(tmp_path) -> None:
 
 
 def test_rejects_decision_with_unknown_reason_tag_value(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     candidate, version = _reviewable_candidate(SQLiteStore(database))
     client = TestClient(create_app(database))
 

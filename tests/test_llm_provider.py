@@ -6,23 +6,25 @@ from datetime import UTC, datetime
 
 import httpx
 
-from webradar_v2.domain.candidates import (
+from domainhunter.crawler.http_probe import HTTPProbe
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.events import SourceEvent
-from webradar_v2.llm.provider import (
+from domainhunter.domain.events import SourceEvent
+from domainhunter.llm.provider import (
     LLMProvider,
     MockLLMProvider,
     OpenAICompatibleProvider,
+    _extract_fenced_json,
+    _extract_tail_json,
+    _strip_thinking,
 )
-from webradar_v2.llm.schema import LLMResultState
-from webradar_v2.pipeline import WebRadarPipeline, enrich_candidate_with_llm
-from webradar_v2.crawler.http_probe import HTTPProbe
-from webradar_v2.storage.sqlite import SQLiteStore
-
+from domainhunter.llm.schema import LLMResultState
+from domainhunter.pipeline import DomainHunterPipeline, enrich_candidate_with_llm
+from domainhunter.storage.sqlite import SQLiteStore
 
 NOW = datetime(2026, 8, 17, tzinfo=UTC)
 EVIDENCE = (
@@ -58,7 +60,7 @@ def test_mock_provider_returns_a_known_candidate_draft() -> None:
         return await provider.extract(
             domain="example.com",
             evidence=EVIDENCE,
-            schema_version="webradar-taxonomy-v1",
+            schema_version="domainhunter-taxonomy-v1",
         )
 
     result = asyncio.run(run())
@@ -73,7 +75,7 @@ def test_mock_provider_can_be_constructed_with_needs_review_reason() -> None:
         return await provider.extract(
             domain="example.com",
             evidence=EVIDENCE,
-            schema_version="webradar-taxonomy-v1",
+            schema_version="domainhunter-taxonomy-v1",
         )
 
     result = asyncio.run(run())
@@ -130,7 +132,7 @@ def test_openai_compatible_provider_posts_to_chat_completions_and_parses_respons
         return await provider.extract(
             domain="example.com",
             evidence=EVIDENCE,
-            schema_version="webradar-taxonomy-v1",
+            schema_version="domainhunter-taxonomy-v1",
         )
 
     result = asyncio.run(run())
@@ -161,7 +163,7 @@ def test_openai_compatible_provider_maps_non_2xx_to_needs_review() -> None:
         return await provider.extract(
             domain="example.com",
             evidence=EVIDENCE,
-            schema_version="webradar-taxonomy-v1",
+            schema_version="domainhunter-taxonomy-v1",
         )
 
     result = asyncio.run(run())
@@ -184,16 +186,17 @@ def test_openai_compatible_provider_maps_timeout_to_needs_review() -> None:
         return await provider.extract(
             domain="example.com",
             evidence=EVIDENCE,
-            schema_version="webradar-taxonomy-v1",
+            schema_version="domainhunter-taxonomy-v1",
         )
 
     result = asyncio.run(run())
     assert result.state is LLMResultState.NEEDS_REVIEW
-    assert "timeout" in (result.reason or "")
+    assert "http error" in (result.reason or "")
+    assert "slow model" in (result.reason or "")
 
 
 def test_pipeline_enriches_a_candidate_using_an_injected_provider(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     html = (
         "<title>Example AI Workflow</title>"
         "<meta name=\"description\" content=\"AI workflow automation platform with a free trial\">"
@@ -208,7 +211,7 @@ def test_pipeline_enriches_a_candidate_using_an_injected_provider(tmp_path) -> N
         async with HTTPProbe(
             resolver=_public_resolver, transport=transport, respect_robots=False
         ) as probe:
-            pipeline = WebRadarPipeline(store=store, probe=probe)
+            pipeline = DomainHunterPipeline(store=store, probe=probe)
             event = SourceEvent("ct_log", "argon:42", "example.com", NOW)
             pipeline.ingest_event(event)
             probe_run = await pipeline.probe_domain("example.com", observed_at=NOW)
@@ -237,7 +240,7 @@ def test_pipeline_enriches_a_candidate_using_an_injected_provider(tmp_path) -> N
 
 
 def test_pipeline_enrichment_returns_none_when_provider_needs_review(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     html = (
         "<title>Example AI Workflow</title>"
         "<meta name=\"description\" content=\"AI workflow automation platform with a free trial\">"
@@ -251,7 +254,7 @@ def test_pipeline_enrichment_returns_none_when_provider_needs_review(tmp_path) -
         async with HTTPProbe(
             resolver=_public_resolver, transport=transport, respect_robots=False
         ) as probe:
-            pipeline = WebRadarPipeline(store=store, probe=probe)
+            pipeline = DomainHunterPipeline(store=store, probe=probe)
             pipeline.ingest_event(SourceEvent("ct_log", "argon:42", "example.com", NOW))
             probe_run = await pipeline.probe_domain("example.com", observed_at=NOW)
             assert probe_run.candidate_version is not None
@@ -270,3 +273,66 @@ def test_pipeline_enrichment_returns_none_when_provider_needs_review(tmp_path) -
         assert versions[0].draft.author_kind == "rule"
 
     asyncio.run(run())
+
+def test_extract_fenced_json() -> None:
+    content = (
+        "thinking about it...\n\n"
+        "```json\n{\"a\": 1}\n```\n"
+        "trailing prose"
+    )
+    assert _extract_fenced_json(content) == '{"a": 1}'
+
+
+def test_extract_fenced_json_absent() -> None:
+    assert _extract_fenced_json("just prose here") is None
+
+
+def test_extract_tail_json() -> None:
+    content = (
+        "thinking...\n\n"
+        '{"is_candidate": false, "reason": "coming soon"}'
+    )
+    assert _extract_tail_json(content) == (
+        '{"is_candidate": false, "reason": "coming soon"}'
+    )
+
+
+def test_extract_tail_json_absent() -> None:
+    assert _extract_tail_json("no json at all") is None
+
+
+def test_strip_thinking_prefers_fence() -> None:
+    content = (
+        "thinking...\n\n"
+        "```json\n{\"a\": 1}\n```"
+    )
+    assert _strip_thinking(content) == '{"a": 1}'
+
+
+def test_strip_thinking_falls_back_to_tail() -> None:
+    content = "thinking...\n\n" + '{"a": 1}'
+    assert _strip_thinking(content) == '{"a": 1}'
+
+
+def test_strip_thinking_returns_raw_when_no_json() -> None:
+    content = "no json here"
+    assert _strip_thinking(content) == "no json here"
+
+
+def test_openai_compatible_provider_tolerates_v1_base_url(monkeypatch) -> None:
+    """base_url ending in /v1 must not produce a double-/v1 request path."""
+
+    captured: dict[str, object] = {}
+
+    def fake_post(self, url, **kwargs):
+        captured["url"] = url
+        return httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}]})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    provider = OpenAICompatibleProvider(
+        base_url="https://api.minimax.chat/v1",
+        token="test-token",
+        model="MiniMax-M3",
+    )
+    assert provider._client.base_url == "https://api.minimax.chat"

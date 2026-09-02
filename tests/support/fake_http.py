@@ -9,7 +9,7 @@ without ever leaving the test process.
 Companion resolver
 ------------------
 
-Because :mod:`webradar_v2.crawler.http_probe` calls a resolver before
+Because :mod:`domainhunter.crawler.http_probe` calls a resolver before
 issuing any request, the server also exposes
 :meth:`FakeHTTPServer.public_resolver` — an awaitable that maps every
 hostname to ``127.0.0.1:<bound_port>`` so callers can drive the real

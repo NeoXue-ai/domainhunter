@@ -1,7 +1,7 @@
 import json
 
-from webradar_v2.domain.candidates import CandidateOutcome, Evidence, EvidenceType
-from webradar_v2.llm.schema import LLMResultState, parse_llm_candidate_output
+from domainhunter.domain.candidates import CandidateOutcome, Evidence, EvidenceType
+from domainhunter.llm.schema import LLMResultState, parse_llm_candidate_output
 
 
 EVIDENCE = (

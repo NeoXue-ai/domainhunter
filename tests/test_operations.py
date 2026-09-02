@@ -7,11 +7,11 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from webradar_v2 import cli
-from webradar_v2.api import create_app
-from webradar_v2.domain.work_queue import WorkStage
-from webradar_v2.scheduler.daemon import WorkerDaemon
-from webradar_v2.storage.sqlite import DEFAULT_DAILY_BUDGET, SQLiteStore
+from domainhunter import cli
+from domainhunter.api import create_app
+from domainhunter.domain.work_queue import WorkStage
+from domainhunter.scheduler.daemon import WorkerDaemon
+from domainhunter.storage.sqlite import DEFAULT_DAILY_BUDGET, SQLiteStore
 
 
 NOW = datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC)
@@ -34,7 +34,7 @@ class _StubPipeline:
 
 
 def test_budget_config_default_returns_hardcoded_fallbacks(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
 
     budgets = store.get_budget_config()
 
@@ -45,7 +45,7 @@ def test_budget_config_default_returns_hardcoded_fallbacks(tmp_path) -> None:
 
 
 def test_set_budget_config_creates_row_and_get_returns_it(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
 
     assert store.set_budget_config(
         WorkStage.L1, daily_limit=42.0, updated_by="alice", occurred_at=NOW
@@ -64,7 +64,7 @@ def test_set_budget_config_creates_row_and_get_returns_it(tmp_path) -> None:
 
 
 def test_set_budget_config_rejects_zero_or_negative(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
 
     with pytest.raises(ValueError):
         store.set_budget_config(
@@ -77,7 +77,7 @@ def test_set_budget_config_rejects_zero_or_negative(tmp_path) -> None:
 
 
 def test_set_budget_config_idempotent_on_identical_update_within_window(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
 
     assert store.set_budget_config(
         WorkStage.L2, daily_limit=10.0, updated_by="bob", occurred_at=NOW
@@ -99,7 +99,7 @@ def test_set_budget_config_idempotent_on_identical_update_within_window(tmp_path
 
 
 def test_pause_stage_creates_pause_row(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
 
     assert store.set_stage_pause(
         WorkStage.LLM,
@@ -120,7 +120,7 @@ def test_pause_stage_creates_pause_row(tmp_path) -> None:
 
 
 def test_is_stage_paused_returns_latest_state(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
 
     assert store.is_stage_paused(WorkStage.LLM) is False
 
@@ -144,7 +144,7 @@ def test_is_stage_paused_returns_latest_state(tmp_path) -> None:
 
 
 def test_unpause_stage_clears_state(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
 
     store.set_stage_pause(
         WorkStage.PUBLICATION,
@@ -169,7 +169,7 @@ def test_unpause_stage_clears_state(tmp_path) -> None:
 
 
 def test_set_stage_pause_idempotent_within_one_minute(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
 
     assert store.set_stage_pause(
         WorkStage.CLAIM,
@@ -194,7 +194,7 @@ def test_set_stage_pause_idempotent_within_one_minute(tmp_path) -> None:
 
 
 def test_api_get_budget_returns_default_when_unset(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     SQLiteStore(database)
     client = TestClient(create_app(database))
 
@@ -211,7 +211,7 @@ def test_api_get_budget_returns_default_when_unset(tmp_path) -> None:
 
 
 def test_api_put_budget_updates_and_returns_200(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     client = TestClient(create_app(database))
 
@@ -231,7 +231,7 @@ def test_api_put_budget_updates_and_returns_200(tmp_path) -> None:
 
 
 def test_api_put_budget_rejects_negative(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     client = TestClient(create_app(database))
 
     response = client.put(
@@ -244,7 +244,7 @@ def test_api_put_budget_rejects_negative(tmp_path) -> None:
 
 
 def test_api_put_budget_unknown_stage_returns_404(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     client = TestClient(create_app(database))
 
     response = client.put(
@@ -257,7 +257,7 @@ def test_api_put_budget_unknown_stage_returns_404(tmp_path) -> None:
 
 
 def test_api_post_pauses_pauses_stage(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     client = TestClient(create_app(database))
 
@@ -286,7 +286,7 @@ def test_api_post_pauses_pauses_stage(tmp_path) -> None:
 
 
 def test_api_get_pauses_lists_current_state(tmp_path) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     client = TestClient(create_app(database))
 
@@ -315,7 +315,7 @@ def test_api_get_pauses_lists_current_state(tmp_path) -> None:
 
 
 def test_cli_budget_show_subcommand(tmp_path, capsys) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
 
     assert cli.main(["budget", "show", "--database", str(database)]) == 0
     body = json.loads(capsys.readouterr().out)
@@ -324,7 +324,7 @@ def test_cli_budget_show_subcommand(tmp_path, capsys) -> None:
 
 
 def test_cli_budget_set_subcommand(tmp_path, capsys) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
 
     assert (
         cli.main(
@@ -349,7 +349,7 @@ def test_cli_budget_set_subcommand(tmp_path, capsys) -> None:
 
 
 def test_cli_budget_set_rejects_zero(tmp_path, capsys) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
 
     assert cli.main(
         [
@@ -368,7 +368,7 @@ def test_cli_budget_set_rejects_zero(tmp_path, capsys) -> None:
 
 
 def test_cli_pause_set_subcommand(tmp_path, capsys) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
 
     assert (
         cli.main(
@@ -399,7 +399,7 @@ def test_cli_pause_set_subcommand(tmp_path, capsys) -> None:
 
 
 def test_cli_pause_show_subcommand(tmp_path, capsys) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     store.set_stage_pause(
         WorkStage.SIGNAL_INGEST,
@@ -422,7 +422,7 @@ def test_cli_pause_show_subcommand(tmp_path, capsys) -> None:
 
 
 def test_daemon_skips_paused_stage(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     store.set_stage_pause(
         WorkStage.L1,
         paused=True,
@@ -455,7 +455,7 @@ def test_daemon_skips_paused_stage(tmp_path) -> None:
 
 
 def test_daemon_uses_budget_loader_when_no_explicit_budget(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
     store.set_budget_config(
         WorkStage.L1, daily_limit=10.0, updated_by="operator", occurred_at=NOW
     )

@@ -1,9 +1,9 @@
 import asyncio
 
-from webradar_v2.crawler.http_probe import ProbeResult
-from webradar_v2.crawler.l1_analysis import L1Analysis
-from webradar_v2.crawler.l3_crawler import L3Crawler, select_l3_urls
-from webradar_v2.domain.observations import OutcomeCode
+from domainhunter.crawler.http_probe import ProbeResult
+from domainhunter.crawler.l1_analysis import L1Analysis
+from domainhunter.crawler.l3_crawler import L3Crawler, select_l3_urls
+from domainhunter.domain.observations import OutcomeCode
 
 
 ANALYSIS = L1Analysis(

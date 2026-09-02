@@ -1,146 +1,81 @@
 import json
 from datetime import UTC, datetime
-from types import SimpleNamespace
+from typing import Self
 
-from fastapi.testclient import TestClient
-
-from webradar_v2 import cli
-from webradar_v2.api import create_app
-from webradar_v2.domain.candidates import (
+from domainhunter import cli
+from domainhunter.api import create_app
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.reviews import ReviewAction, build_review_decision
-from webradar_v2.ingest.github_poller import GitHubPage, GitHubRepository
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.reviews import ReviewAction, build_review_decision
+from domainhunter.ingest.ct_poller import CTCertificate, CTPage
+from domainhunter.storage.sqlite import SQLiteStore
 
 
-def test_cli_imports_github_page_and_reports_due_domain(tmp_path, capsys) -> None:
-    database = tmp_path / "webradar.db"
-    source_page = tmp_path / "github-page.json"
-    source_page.write_text(
-        json.dumps(
-            {
-                "next_cursor": "page-2",
-                "repositories": [
-                    {
-                        "repository_id": "123",
-                        "homepage": "https://app.example.com",
-                        "observed_at": "2026-08-16T00:00:00+00:00",
-                    }
-                ],
-            }
-        )
-    )
-
-    assert cli.main(["init", "--database", str(database)]) == 0
-    capsys.readouterr()
-    assert (
-        cli.main(
-            [
-                "ingest-github-page",
-                "--database",
-                str(database),
-                "--input",
-                str(source_page),
-            ]
-        )
-        == 0
-    )
-    imported = json.loads(capsys.readouterr().out)
-
-    assert imported["events_added"] == 1
-    assert cli.main(["status", "--database", str(database), "--at", "2026-08-16T00:00:00+00:00"]) == 0
-    status = json.loads(capsys.readouterr().out)
-
-    assert status["domains"] == ["example.com"]
-    assert status["due_domains"] == ["example.com"]
-
-
-def test_cli_polls_github_api_with_an_explicit_query_and_token(tmp_path, capsys, monkeypatch) -> None:
-    captured: dict[str, str | None] = {}
+def test_cli_polls_ct_log_and_reports_due_domain(tmp_path, capsys, monkeypatch) -> None:
+    """poll-ct-log invokes the orchestrator, persisting events for due domains."""
 
     class FakeFetcher:
-        def __init__(self, *, query: str, token: str | None) -> None:
-            captured.update(query=query, token=token)
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
 
-        async def __call__(self, cursor: str | None) -> GitHubPage:
-            return GitHubPage(
-                repositories=(
-                    GitHubRepository(
-                        "123",
-                        "https://app.example.com",
-                        cli._parse_datetime("2026-08-16T00:00:00+00:00"),
-                    ),
-                ),
-                next_cursor="2",
-            )
-
-        async def __aenter__(self) -> "FakeFetcher":
+        async def __aenter__(self) -> Self:
             return self
 
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-    monkeypatch.setattr(cli, "GitHubSearchFetcher", FakeFetcher)
-    database = tmp_path / "webradar.db"
-
-    assert (
-        cli.main(
-            [
-                "poll-github-api",
-                "--database",
-                str(database),
-                "--query",
-                "topic:artificial-intelligence",
-                "--token",
-                "secret-token",
-            ]
-        )
-        == 0
-    )
-
-    assert json.loads(capsys.readouterr().out)["events_added"] == 1
-    assert captured == {"query": "topic:artificial-intelligence", "token": "secret-token"}
-
-
-def test_cli_listens_to_certstream_with_a_bounded_message_count(tmp_path, capsys, monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    class FakeListener:
-        def __init__(self, *, store, url: str) -> None:
-            captured["url"] = url
-
-        async def listen(self, *, max_messages: int | None):
-            captured["max_messages"] = max_messages
-            return SimpleNamespace(
-                messages_seen=3,
-                certificate_updates=2,
-                invalid_messages=1,
-                events_added=4,
+        async def __call__(self, cursor: str | None) -> CTPage:
+            observed = cli._parse_datetime("2026-08-16T00:00:00+00:00")
+            return CTPage(
+                entries=(
+                    CTCertificate(
+                        source_event_id="argon:42",
+                        certificate={
+                            "leaf_cert": {
+                                "subject": {"CN": "app.example.com"},
+                                "all_domains": ["app.example.com", "example.com"],
+                            }
+                        },
+                        observed_at=observed,
+                    ),
+                ),
+                next_cursor='{"argon": 43}',
             )
 
-    monkeypatch.setattr(cli, "CertStreamListener", FakeListener)
+    monkeypatch.setattr(cli, "CTLogFetcher", FakeFetcher)
+    database = tmp_path / "domainhunter.db"
 
     assert (
         cli.main(
             [
-                "listen-certstream",
+                "poll-ct-log",
                 "--database",
-                str(tmp_path / "webradar.db"),
-                "--url",
-                "wss://ct.example.test",
-                "--max-messages",
-                "3",
+                str(database),
+                "--log",
+                "argon=https://ct.example.test/logs/argon",
+                "--max-probes",
+                "5",
             ]
         )
         == 0
     )
 
-    assert json.loads(capsys.readouterr().out)["events_added"] == 4
-    assert captured == {"url": "wss://ct.example.test", "max_messages": 3}
+    imported = json.loads(capsys.readouterr().out)
+    assert imported["certificates_seen"] == 1
+    assert imported["events_added"] == 2
+
+    assert (
+        cli.main(
+            ["status", "--database", str(database), "--at", "2026-08-16T00:00:00+00:00"]
+        )
+        == 0
+    )
+    status = json.loads(capsys.readouterr().out)
+    assert "example.com" in status["domains"]
 
 
 def test_cli_serves_the_review_api_from_an_explicit_database(tmp_path, monkeypatch) -> None:
@@ -158,7 +93,7 @@ def test_cli_serves_the_review_api_from_an_explicit_database(tmp_path, monkeypat
             [
                 "serve",
                 "--database",
-                str(tmp_path / "webradar.db"),
+                str(tmp_path / "domainhunter.db"),
                 "--host",
                 "127.0.0.1",
                 "--port",
@@ -172,10 +107,253 @@ def test_cli_serves_the_review_api_from_an_explicit_database(tmp_path, monkeypat
     assert captured["port"] == 8765
 
 
+def test_cli_filter_runs_funnel_and_reports(tmp_path, capsys, monkeypatch) -> None:
+    """filter invokes the S1→S2→S3 funnel and prints report + candidates."""
+
+    class FakePipeline:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        def report(self, domains: list[str]) -> dict[str, object]:
+            return {"input": len(domains), "kept": 1, "dropped": len(domains) - 1}
+
+        def run(self, domains: list[str]) -> tuple:
+            from domainhunter.filter.pipeline import FilteredCandidate
+            from domainhunter.filter.rdap_age import AgeVerdict
+            from domainhunter.filter.static_signals import DomainScore, compute_signals
+
+            return (
+                FilteredCandidate(
+                    domain=domains[0],
+                    s1=DomainScore(
+                        domain=domains[0],
+                        score=0.9,
+                        signals=compute_signals(domains[0]),
+                    ),
+                    s2=AgeVerdict(
+                        domain=domains[0], tier="tier1", age_days=3, reason="new"
+                    ),
+                    s3=None,
+                    final_tier="tier1",
+                    reason="new",
+                    observed_at=datetime.now(UTC),
+                ),
+            )
+
+    import domainhunter.filter.pipeline as filter_pipeline
+
+    monkeypatch.setattr(filter_pipeline, "FilterPipeline", FakePipeline)
+    input_file = tmp_path / "domains.json"
+    input_file.write_text(json.dumps({"domains": ["new.com", "old.com"]}))
+
+    assert (
+        cli.main(
+            ["filter", "--input", str(input_file), "--tier1-days", "30", "--require-dns"]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["report"]["input"] == 2
+    assert payload["report"]["kept"] == 1
+    assert payload["candidates"][0]["final_tier"] == "tier1"
+
+
+def test_cli_filter_probe_runs_funnel_and_probes(tmp_path, capsys, monkeypatch) -> None:
+    """filter-probe runs the funnel then S4-probes survivors into the DB."""
+
+
+    class FakePipeline:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        async def run_with_probe(self, domains, **kwargs):
+            from domainhunter.filter.pipeline import FilteredCandidate
+            from domainhunter.filter.rdap_age import AgeVerdict
+            from domainhunter.filter.static_signals import DomainScore, compute_signals
+
+            return (
+                FilteredCandidate(
+                    domain=domains[0],
+                    s1=DomainScore(
+                        domain=domains[0], score=0.9, signals=compute_signals(domains[0])
+                    ),
+                    s2=AgeVerdict(
+                        domain=domains[0], tier="tier1", age_days=3, reason="new"
+                    ),
+                    s3=None,
+                    final_tier="tier1",
+                    reason="new",
+                    observed_at=datetime.now(UTC),
+                    probe={"outcome": "success", "status_code": 200},
+                ),
+            )
+
+    import domainhunter.filter.pipeline as filter_pipeline
+
+    monkeypatch.setattr(filter_pipeline, "FilterPipeline", FakePipeline)
+    input_file = tmp_path / "domains.json"
+    input_file.write_text(json.dumps({"domains": ["new.com"]}))
+
+    assert (
+        cli.main(
+            [
+                "filter-probe",
+                "--database",
+                str(tmp_path / "domainhunter.db"),
+                "--input",
+                str(input_file),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidates"][0]["final_tier"] == "tier1"
+    assert payload["candidates"][0]["probe"]["outcome"] == "success"
+
+
+def test_cli_filter_enrich_runs_full_funnel(tmp_path, capsys, monkeypatch) -> None:
+    """filter-enrich runs the full S1→S5 funnel with the mock provider."""
+
+    class FakeOutcome:
+        def __init__(self, domain: str) -> None:
+            self.domain = domain
+            self.stage = "enriched"
+            self.final_tier = "tier1"
+            self.s1_score = 0.9
+            self.age_days = 3
+            self.probe_outcome = "success"
+            self.llm_outcome = "publishable_ai_saas"
+            self.llm_confidence = 0.9
+            self.llm_model = "mock-1"
+            self.reason = "LLM classification persisted"
+
+        def as_payload(self) -> dict[str, object]:
+            return {
+                "domain": self.domain,
+                "stage": self.stage,
+                "final_tier": self.final_tier,
+                "s1_score": self.s1_score,
+                "age_days": self.age_days,
+                "probe_outcome": self.probe_outcome,
+                "llm_outcome": self.llm_outcome,
+                "llm_confidence": self.llm_confidence,
+                "llm_model": self.llm_model,
+                "reason": self.reason,
+            }
+
+    async def fake_run_batch(**kwargs) -> tuple:
+        return (FakeOutcome(kwargs["domains"][0]),)
+
+    import domainhunter.filter.enrich as enrich_module
+
+    monkeypatch.setattr(enrich_module, "run_batch", fake_run_batch)
+    input_file = tmp_path / "domains.json"
+    input_file.write_text(json.dumps({"domains": ["new.com"]}))
+
+    assert (
+        cli.main(
+            [
+                "filter-enrich",
+                "--database",
+                str(tmp_path / "domainhunter.db"),
+                "--input",
+                str(input_file),
+                "--provider",
+                "mock",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["outcomes"][0]["stage"] == "enriched"
+    assert payload["outcomes"][0]["llm_outcome"] == "publishable_ai_saas"
+
+
+def test_cli_filter_enrich_fresh_only_skips_seen_domains(tmp_path, capsys, monkeypatch) -> None:
+    """fresh-only marks inputs as seen and only enriches never-seen domains."""
+
+    class FakeOutcome:
+        def __init__(self, domain: str) -> None:
+            self.domain = domain
+            self.stage = "enriched"
+            self.final_tier = "tier1"
+            self.s1_score = 0.9
+            self.age_days = 3
+            self.probe_outcome = "success"
+            self.llm_outcome = "publishable_ai_saas"
+            self.llm_confidence = 0.9
+            self.llm_model = "mock-1"
+            self.reason = "LLM classification persisted"
+
+        def as_payload(self) -> dict[str, object]:
+            return {
+                "domain": self.domain,
+                "stage": self.stage,
+                "final_tier": self.final_tier,
+                "s1_score": self.s1_score,
+                "age_days": self.age_days,
+                "probe_outcome": self.probe_outcome,
+                "llm_outcome": self.llm_outcome,
+                "llm_confidence": self.llm_confidence,
+                "llm_model": self.llm_model,
+                "reason": self.reason,
+            }
+
+    async def fake_run_batch(**kwargs) -> tuple:
+        return tuple(FakeOutcome(d) for d in kwargs["domains"])
+
+    import domainhunter.filter.enrich as enrich_module
+
+    monkeypatch.setattr(enrich_module, "run_batch", fake_run_batch)
+    database = tmp_path / "domainhunter.db"
+    input_file = tmp_path / "domains.json"
+    input_file.write_text(json.dumps({"domains": ["first.com", "seen.com"]}))
+
+    # First run: both are fresh.
+    assert (
+        cli.main(
+            [
+                "filter-enrich",
+                "--database",
+                str(database),
+                "--input",
+                str(input_file),
+                "--provider",
+                "mock",
+                "--fresh-only",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["fresh_only"]["fresh"] == 2
+    assert len(payload["outcomes"]) == 2
+
+    # Second run: both are now seen → no outcomes.
+    assert (
+        cli.main(
+            [
+                "filter-enrich",
+                "--database",
+                str(database),
+                "--input",
+                str(input_file),
+                "--provider",
+                "mock",
+                "--fresh-only",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["fresh_only"]["fresh"] == 0
+    assert payload["outcomes"] == []
+
+
 def test_cli_outreach_triggers_a_dry_run_against_an_approved_human_version(
     tmp_path, capsys, monkeypatch
 ) -> None:
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate = store.create_candidate("example.com", created_at=datetime(2026, 8, 16, tzinfo=UTC))
     version = store.append_candidate_version(
@@ -242,7 +420,7 @@ def test_cli_outreach_triggers_a_dry_run_against_an_approved_human_version(
 
 def test_cli_enrich_llm_persists_a_model_version(tmp_path, capsys) -> None:
     """The mock provider persists a second llm version on top of the rule draft."""
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate = store.create_candidate("example.com", created_at=datetime(2026, 8, 17, tzinfo=UTC))
     store.append_candidate_version(

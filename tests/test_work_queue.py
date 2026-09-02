@@ -1,14 +1,14 @@
 from datetime import UTC, datetime, timedelta
 
-from webradar_v2.domain.work_queue import WorkStage
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.work_queue import WorkStage
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 NOW = datetime(2026, 8, 16, tzinfo=UTC)
 
 
 def test_leases_due_work_once_then_allows_reclaim_after_expiry(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
 
     assert store.enqueue_work(WorkStage.L2, "candidate-1", scheduled_at=NOW) is True
     first = store.claim_work(
@@ -29,7 +29,7 @@ def test_leases_due_work_once_then_allows_reclaim_after_expiry(tmp_path) -> None
 
 
 def test_defers_expensive_work_when_the_daily_budget_is_exhausted(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "webradar.db")
+    store = SQLiteStore(tmp_path / "domainhunter.db")
 
     first = store.reserve_budget(
         WorkStage.LLM, units=2, daily_limit=3, occurred_at=NOW, entity_id="candidate-1"

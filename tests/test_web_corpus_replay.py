@@ -2,7 +2,7 @@
 
 Spec §15 requires a fixed, replayable evidence set so any classifier change
 (rule edit, prompt tweak, model swap) can be benchmarked against the same
-inputs. These tests only exercise :func:`webradar_v2.llm.eval.evaluate_predictions`
+inputs. These tests only exercise :func:`domainhunter.llm.eval.evaluate_predictions`
 plus a few trivial classifiers; they do not call any LLM.
 """
 
@@ -15,14 +15,14 @@ from pathlib import Path
 
 import pytest
 
-from webradar_v2.domain.candidates import (
+from domainhunter.domain.candidates import (
     Candidate,
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.llm.eval import (
+from domainhunter.llm.eval import (
     ExpectedOutcome,
     PrecisionMetrics,
     evaluate_predictions,

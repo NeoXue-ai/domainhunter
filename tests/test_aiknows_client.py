@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 import httpx
 
-from webradar_v2.domain.candidates import (
+from domainhunter.domain.candidates import (
     Candidate,
     CandidateOutcome,
     CandidateVersion,
@@ -11,7 +11,7 @@ from webradar_v2.domain.candidates import (
     Evidence,
     EvidenceType,
 )
-from webradar_v2.publish.aiknows_client import AIKnowsClient, SyncStatus
+from domainhunter.publish.aiknows_client import AIKnowsClient, SyncStatus
 
 
 NOW = datetime(2026, 8, 16, tzinfo=UTC)
@@ -62,7 +62,7 @@ def test_syncs_a_human_approved_draft_with_candidate_version_idempotency() -> No
         assert result.external_entry_id == "aik-42"
         assert requests[0].headers["idempotency-key"] == "candidate-1:2"
         assert requests[0].headers["authorization"] == "Bearer service-token"
-        assert requests[0].url.path == "/v1/webradar/drafts"
+        assert requests[0].url.path == "/v1/domainhunter/drafts"
 
     asyncio.run(run())
 

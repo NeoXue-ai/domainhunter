@@ -1,6 +1,6 @@
 import pytest
 
-from webradar_v2.domain.normalization import InvalidHostname, normalize_hostname
+from domainhunter.domain.normalization import InvalidHostname, normalize_hostname
 
 
 @pytest.mark.parametrize(

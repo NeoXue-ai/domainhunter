@@ -21,16 +21,16 @@ import time
 import httpx
 import uvicorn
 
-from webradar_v2.api import create_app
-from webradar_v2.domain.candidates import (
+from domainhunter.api import create_app
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.reviews import ReviewAction, build_review_decision
-from webradar_v2.domain.review_priority import ReviewPriorityInputs, calculate_review_priority
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.reviews import ReviewAction, build_review_decision
+from domainhunter.domain.review_priority import ReviewPriorityInputs, calculate_review_priority
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 OBSERVED_AT = datetime(2026, 8, 17, tzinfo=UTC)
@@ -109,7 +109,7 @@ class _LiveServer:
 
 def test_store_appends_idempotent_concurrent_decisions_only_once(tmp_path) -> None:
     """Two threads racing on the same request_id must produce one decision row."""
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate, version = _reviewable_candidate(store)
     request_id = "concurrent-decision-1"
@@ -145,7 +145,7 @@ def test_store_appends_idempotent_concurrent_decisions_only_once(tmp_path) -> No
 
 def test_http_api_concurrent_decisions_resolve_to_one_created(tmp_path) -> None:
     """Two simultaneous POSTs with the same request_id must yield one created row."""
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate, version = _reviewable_candidate(store)
     body = {
@@ -195,7 +195,7 @@ def test_http_api_different_request_ids_return_one_conflict(tmp_path) -> None:
     decision with a different request_id and the API responds with 409 plus
     the active decision's identifiers.
     """
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate, version = _reviewable_candidate(store)
 

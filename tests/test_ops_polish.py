@@ -16,18 +16,18 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from webradar_v2.api import create_app
-from webradar_v2.crawler.http_probe import HostRateLimiter
-from webradar_v2.domain.candidates import (
+from domainhunter.api import create_app
+from domainhunter.crawler.http_probe import HostRateLimiter
+from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
     Evidence,
     EvidenceType,
 )
-from webradar_v2.domain.reviews import ReviewAction, build_review_decision
-from webradar_v2.domain.review_priority import ReviewPriorityInputs, calculate_review_priority
-from webradar_v2.domain.work_queue import WorkStage
-from webradar_v2.storage.sqlite import SQLiteStore
+from domainhunter.domain.reviews import ReviewAction, build_review_decision
+from domainhunter.domain.review_priority import ReviewPriorityInputs, calculate_review_priority
+from domainhunter.domain.work_queue import WorkStage
+from domainhunter.storage.sqlite import SQLiteStore
 
 
 OBSERVED_AT = datetime(2026, 8, 17, tzinfo=UTC)
@@ -63,7 +63,7 @@ def _seed_candidate(store: SQLiteStore, hostname: str = "example.com"):
 
 def test_concurrent_decision_conflict_returns_409(tmp_path) -> None:
     """Two reviewers with different request_ids on the same version → 409."""
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate, version = _seed_candidate(store)
     client = TestClient(create_app(database))
@@ -95,7 +95,7 @@ def test_concurrent_decision_conflict_returns_409(tmp_path) -> None:
 
 def test_concurrent_decision_same_request_id_is_idempotent(tmp_path) -> None:
     """Replay with the same request_id must remain 200, not 409."""
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate, version = _seed_candidate(store)
     client = TestClient(create_app(database))
@@ -122,7 +122,7 @@ def test_concurrent_decision_same_request_id_is_idempotent(tmp_path) -> None:
 
 def test_revoked_decision_does_not_block_new_decision(tmp_path) -> None:
     """Once the active decision is revoked, a fresh request_id may decide again."""
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate, version = _seed_candidate(store)
     client = TestClient(create_app(database))
@@ -163,7 +163,7 @@ def test_revoked_decision_does_not_block_new_decision(tmp_path) -> None:
 
 def test_metrics_exposes_cost_per_effective_candidate(tmp_path) -> None:
     """cost_per_effective_candidate = reserved_units / max(1, approved_count)."""
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     approved_a, version_a = _seed_candidate(store, hostname="approved-a.example")
     approved_b, version_b = _seed_candidate(store, hostname="approved-b.example")
@@ -213,7 +213,7 @@ def test_metrics_exposes_cost_per_effective_candidate(tmp_path) -> None:
 
 def test_metrics_zero_approved_returns_cost_based_on_max_1(tmp_path) -> None:
     """No approvals → use max(1, 0) as the divisor; no division by zero."""
-    database = tmp_path / "webradar.db"
+    database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     store.reserve_budget(
         WorkStage.L1, units=4.0, daily_limit=100.0, occurred_at=OBSERVED_AT, entity_id="seed"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from webradar_v2.api import create_app
+from domainhunter.api import create_app
 
 _DB = Path(__file__).resolve().parent.parent / "demo.db"
 

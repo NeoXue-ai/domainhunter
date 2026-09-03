@@ -13,6 +13,7 @@ import uvicorn
 from domainhunter.api import create_app
 from domainhunter.crawler.http_probe import HTTPProbe
 from domainhunter.domain.work_queue import WorkStage
+from domainhunter.filter.pipeline import FilterPipeline
 from domainhunter.ingest.ct_log_adapter import DEFAULT_LOG, CTLogFetcher, CTLogTarget
 from domainhunter.ingest.ct_orchestrator import CTIngestOrchestrator
 from domainhunter.ingest.ct_poller import CTCertificate, CTPage, CTPoller
@@ -54,11 +55,19 @@ async def _run_orchestrator(args: argparse.Namespace, fetcher: object) -> object
     poller = CTPoller(store=store, fetch_page=fetcher)  # type: ignore[arg-type]
     async with HTTPProbe() as probe:
         pipeline = DomainHunterPipeline(store=store, probe=probe)
+        strict_filter = FilterPipeline(
+            tier1_days=30,
+            tier2_days=90,
+            require_dns=True,
+            drop_unknown_rdap=True,
+        )
         orchestrator = CTIngestOrchestrator(
             store=store,
             poller=poller,
             pipeline=pipeline,
             probe_limit=args.max_probes,
+            filter_pipeline=strict_filter,
+            require_first_seen=True,
         )
         return await orchestrator.run_once()
 
@@ -822,7 +831,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     poll_ct_log = subparsers.add_parser(
         "poll-ct-log",
-        help="poll a live RFC 6962 CT log, probe each new hostname, persist candidates",
+        help="poll a live RFC 6962 CT log and strictly probe verified newborn domains",
     )
     poll_ct_log.add_argument("--database", required=True, type=Path)
     poll_ct_log.add_argument(

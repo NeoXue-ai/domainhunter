@@ -10,12 +10,15 @@ no-candidate paths.
 """
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Mapping
 
 from domainhunter.crawler.http_probe import ProbeResult
 from domainhunter.crawler.l1_analysis import L1Analysis
 from domainhunter.domain.observations import OutcomeCode
+from domainhunter.filter.dns_check import DnsResult
+from domainhunter.filter.pipeline import FilterPipeline
+from domainhunter.filter.rdap_age import MemoryCache, Registration
 from domainhunter.ingest.ct_events import build_ct_events
 from domainhunter.ingest.ct_orchestrator import CTIngestOrchestrator
 from domainhunter.ingest.ct_poller import CTCertificate, CTPage, CTPoller
@@ -230,6 +233,52 @@ def test_strict_mode_filters_before_probe_and_marks_rejected_roots_seen(tmp_path
     assert store.is_seen("azure.com") is True
     assert store.is_seen("new-ai.dev") is True
     assert {item.candidate.domain for item in store.list_review_queue()} == {"new-ai.dev"}
+
+
+def test_strict_mode_never_probes_a_domain_dropped_by_rdap_age(tmp_path) -> None:
+    """A newly observed certificate cannot make an old registration a candidate."""
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    poller = _make_poller(
+        store,
+        (
+            CTPage(
+                entries=(_cert("microsoft-certificate", "azure.com"),),
+                next_cursor="microsoft-certificate",
+            ),
+        ),
+    )
+    old_registration = Registration(
+        domain="azure.com",
+        registration_date=datetime.now(UTC) - timedelta(days=365 * 20),
+        registrar="Example Registrar",
+        statuses=(),
+    )
+    strict_filter = FilterPipeline(
+        cache=MemoryCache(),
+        rdap_fetcher=lambda _domain: old_registration,
+        dns_checker=lambda domains: {
+            domain: DnsResult(domain=domain, has_a=True, addresses=("1.2.3.4",))
+            for domain in domains
+        },
+        require_dns=True,
+        drop_unknown_rdap=True,
+    )
+    pipeline = DomainHunterPipeline(store=store, probe=_FakeProbe({}))  # type: ignore[arg-type]
+    orchestrator = CTIngestOrchestrator(
+        store=store,
+        poller=poller,
+        pipeline=pipeline,
+        filter_pipeline=strict_filter,
+        require_first_seen=True,
+        probe_limit=10,
+    )
+
+    summary = _run(orchestrator.run_once(observed_at=_OBSERVED))
+
+    assert summary.probes_run == 0
+    assert summary.candidates_created == 0
+    assert store.list_review_queue() == ()
+    assert store.is_seen("azure.com") is True
 
 
 def test_idempotent_on_replay(tmp_path) -> None:

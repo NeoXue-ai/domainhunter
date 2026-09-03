@@ -20,6 +20,7 @@ from domainhunter.domain.reopens import build_reopen_event
 from domainhunter.domain.reviews import ReasonTag, ReviewAction, build_review_decision
 from domainhunter.domain.work_queue import WorkStage
 from domainhunter.crawler.http_probe import HTTPProbe
+from domainhunter.filter.pipeline import FilterPipeline
 from domainhunter.ingest.ct_log_adapter import CTLogFetcher, DEFAULT_LOG
 from domainhunter.ingest.ct_orchestrator import CTIngestOrchestrator
 from domainhunter.ingest.ct_poller import CTPoller
@@ -180,11 +181,19 @@ def create_app(
                 poller = CTPoller(store=store, fetch_page=fetcher)
                 async with HTTPProbe() as probe:
                     pipeline = DomainHunterPipeline(store=store, probe=probe)
+                    strict_filter = FilterPipeline(
+                        tier1_days=30,
+                        tier2_days=90,
+                        require_dns=True,
+                        drop_unknown_rdap=True,
+                    )
                     orchestrator = CTIngestOrchestrator(
                         store=store,
                         poller=poller,
                         pipeline=pipeline,
                         probe_limit=payload.max_probes,
+                        filter_pipeline=strict_filter,
+                        require_first_seen=True,
                     )
                     summary = await orchestrator.run_once()
         except Exception as error:
@@ -1961,4 +1970,3 @@ def _build_page(active: str, body_html: str, page_script: str, current_id: str =
 
 def _review_page(candidate_id: str) -> str:
     return _build_page("review", REVIEW_DETAIL_HTML, REVIEW_SCRIPT, current_id=candidate_id)
-

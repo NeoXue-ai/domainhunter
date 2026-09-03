@@ -143,7 +143,7 @@ class FilterPipeline:
                 final_tier = "tier2"  # unknown RDAP degrades to tier2
             reason = f"{verdict.reason}"
 
-            if self._require_dns and dns is not None and not dns.has_a:
+            if self._require_dns and (dns is None or not dns.has_a):
                 continue
             if dns is not None and not dns.has_a:
                 reason += " | no DNS"

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from fastapi import FastAPI, Header, HTTPException, Response, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from domainhunter.domain.claims import build_claim_token
@@ -249,14 +249,14 @@ def create_app(
         return _review_page(candidate_id)
 
     @app.get("/discovery", response_class=HTMLResponse, include_in_schema=False)
-    def discovery_console() -> str:
-        """Discovery control page: Run button + recent domains."""
-        return _build_page("discovery", DISCOVERY_HTML, DISCOVERY_SCRIPT)
+    def discovery_console() -> RedirectResponse:
+        """Preserve old bookmarks while keeping the inbox as the only entry point."""
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.get("/ops", response_class=HTMLResponse, include_in_schema=False)
-    def ops_console() -> str:
-        """Operations dashboard: analytics + alerts + runbook."""
-        return _build_page("ops", OPS_HTML, OPS_SCRIPT)
+    def ops_console() -> RedirectResponse:
+        """Preserve old bookmarks while keeping the inbox as the only entry point."""
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/v1/run/discovery")
     async def run_discovery(payload: DiscoveryRunRequest) -> dict[str, object]:
@@ -2192,7 +2192,9 @@ def _candidate_detail_page(candidate_id: str) -> str:
       }
       function renderDetail() {
         const priority = detail.priority && typeof detail.priority.score === 'number' ? `优先级 ${detail.priority.score.toFixed(2)}` : null;
-        const external = detail.canonical_url ? `<a class="visit-link" href="${esc(detail.canonical_url)}" target="_blank" rel="noopener noreferrer">访问网站 ↗</a>` : '';
+        const citedUrl = detail.evidence?.find(item => item.url)?.url;
+        const visitUrl = detail.canonical_url || citedUrl;
+        const external = visitUrl ? `<a class="visit-link" href="${esc(visitUrl)}" target="_blank" rel="noopener noreferrer">访问网站 ↗</a>` : '';
         $('#candidate-detail').innerHTML = `<header class="identity"><div class="identity-row"><div><h1 class="domain">${esc(detail.domain)}</h1>${detail.name_suggestion ? `<p class="name">${esc(detail.name_suggestion)}</p>` : ''}<div class="chips"><span class="chip">${esc(labels[detail.primary_outcome] || detail.primary_outcome || '待判断')}</span>${priority ? `<span class="chip priority">${esc(priority)}</span>` : ''}<span class="chip ${detail.review_state === 'pending' ? 'pending' : 'decided'}">${esc(stateLabels[detail.review_state] || detail.review_state)}</span><span class="chip">版本 ${esc(detail.version)}</span></div></div>${external}</div></header>`;
         renderEvidence(); renderProduct();
         $('#audit-details pre').textContent = JSON.stringify({ candidate_id:detail.candidate_id, version:detail.version, review_state:detail.review_state, newness:detail.newness, reachability:detail.reachability, evidence:detail.evidence, audit:detail.audit }, null, 2);

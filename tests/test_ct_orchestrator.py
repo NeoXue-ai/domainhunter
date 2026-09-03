@@ -48,6 +48,32 @@ class _FakeProbe:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _FilteredRoot:
+    """Minimal filter result carrying the domain selected for probing."""
+
+    domain: str
+
+
+class _FakeFilterPipeline:
+    """Records the strict-mode inputs and returns only its configured roots."""
+
+    def __init__(self, kept_domains: set[str]) -> None:
+        self._kept_domains = kept_domains
+        self.calls: list[tuple[tuple[str, ...], datetime]] = []
+
+    def run(
+        self, domains: list[str], *, observed_at: datetime | None = None
+    ) -> tuple[_FilteredRoot, ...]:
+        assert observed_at is not None
+        self.calls.append((tuple(domains), observed_at))
+        return tuple(
+            _FilteredRoot(domain)
+            for domain in domains
+            if domain in self._kept_domains
+        )
+
+
 def _ai_publishable(domain: str) -> L1Analysis:
     return L1Analysis(
         outcome_code=OutcomeCode.SUCCESS,
@@ -165,6 +191,45 @@ def test_respects_probe_limit(tmp_path) -> None:
         assert summary.events_added == 5
 
     _run(go())
+
+
+def test_strict_mode_filters_before_probe_and_marks_rejected_roots_seen(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    page = CTPage(
+        entries=(
+            _cert("c1", "azure.com"),
+            _cert("c2", "new-ai.dev"),
+        ),
+        next_cursor="c2",
+    )
+    poller = _make_poller(store, (page,))
+    probe = _FakeProbe(
+        {
+            "azure.com": _ai_publishable("azure.com"),
+            "new-ai.dev": _ai_publishable("new-ai.dev"),
+        }
+    )
+    pipeline = DomainHunterPipeline(store=store, probe=probe)  # type: ignore[arg-type]
+    strict_filter = _FakeFilterPipeline({"new-ai.dev"})
+    orchestrator = CTIngestOrchestrator(
+        store=store,
+        poller=poller,
+        pipeline=pipeline,
+        filter_pipeline=strict_filter,
+        require_first_seen=True,
+        probe_limit=10,
+    )
+
+    async def go() -> None:
+        summary = await orchestrator.run_once(observed_at=_OBSERVED)
+        assert summary.probes_run == 1
+        assert summary.candidates_created == 1
+
+    _run(go())
+    assert strict_filter.calls == [(("azure.com", "new-ai.dev"), _OBSERVED)]
+    assert store.is_seen("azure.com") is True
+    assert store.is_seen("new-ai.dev") is True
+    assert {item.candidate.domain for item in store.list_review_queue()} == {"new-ai.dev"}
 
 
 def test_idempotent_on_replay(tmp_path) -> None:

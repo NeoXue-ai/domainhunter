@@ -87,16 +87,22 @@ domainhunter discover \
 Every round: collect from all public CT logs → first-seen filter →
 S1–S5 enrichment → mark seen. Runs forever; stop with Ctrl-C.
 
-### Review console
+### 候选收件箱
 
 ```bash
 domainhunter serve --database ./domainhunter.db --host 127.0.0.1 --port 8000
 # open http://127.0.0.1:8000/
 ```
 
-Keyboard shortcuts on `/review/<id>`: `A` approve · `R` reject ·
-`D` defer · `B` blocklist · `E` edit · `O` outreach (dry) · `J`/`K`
-and `←`/`→` paginate.
+首页是中文候选收件箱，而不是监控大盘：它只显示尚未人工决定、并已按审核优先级排序的候选。点击候选会进入独立详情页，查看持久化的新网站、可访问性和产品证据后，再批准、暂缓、拒绝或拉黑。审核动作需要审核人 ID，并会记录到 SQLite。
+
+点击“扫描新网站”会发起一次真实的严格 CT 扫描。界面只显示服务端返回的结果，且明确区分三种状态：
+
+- `completed`：本次扫描产生了可审核候选；
+- `no_candidates`：扫描完成，但没有候选通过严格规则；
+- 失败：请求或上游扫描失败，界面会显示可复制的错误摘要，不会伪装成零候选。
+
+旧的 `/discovery` 和 `/ops` 链接会重定向到收件箱。
 
 ## First-seen: the core idea
 
@@ -150,7 +156,9 @@ unless you pass `--host 0.0.0.0`.
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/v1/review-queue` | Queue projection with cited evidence + priority |
+| `GET` | `/v1/review-queue` | 仅待审核候选的收件箱投影，含持久化证据状态与优先级 |
+| `GET` | `/v1/candidates/{id}/review-context` | 独立详情页使用的最新候选版本与证据上下文 |
+| `GET` | `/v1/candidates/{id}/versions/{v}/review-context` | 指定不可变版本的证据上下文 |
 | `POST` | `/v1/candidates/{id}/versions/{v}/decisions` | Idempotent on `request_id`; requires `X-Actor-ID` header |
 | `POST` | `/v1/candidates/{id}/versions/{v}/outreach` | Dry-run by default; emits redacted contact page |
 | `GET` | `/v1/discovery/overview` | Source-event counts + recent candidates |
@@ -164,7 +172,7 @@ unless you pass `--host 0.0.0.0`.
 
 ```
 src/domainhunter/
-  api.py        — FastAPI routes + the four-page review console
+  api.py        — FastAPI routes + 候选收件箱和独立证据详情页
   cli.py        — `domainhunter` command-line entry point
   crawler/      — bounded L3 same-host crawler
   domain/       — PSL-aware hostname normalization, evidence, candidate model

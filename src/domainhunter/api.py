@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Protocol
 
 from fastapi import FastAPI, Header, HTTPException, Response, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from domainhunter.domain.claims import build_claim_token
@@ -18,6 +19,7 @@ from domainhunter.domain.observations import Observation, OutcomeCode
 from domainhunter.domain.outreach import OutreachEvent
 from domainhunter.domain.reopens import build_reopen_event
 from domainhunter.domain.reviews import ReasonTag, ReviewAction, build_review_decision
+from domainhunter.domain.verification import CandidateVerification
 from domainhunter.domain.work_queue import WorkStage
 from domainhunter.crawler.http_probe import HTTPProbe
 from domainhunter.filter.pipeline import FilterPipeline
@@ -28,6 +30,9 @@ from domainhunter.pipeline import DomainHunterPipeline
 from domainhunter.publish.claim_service import ClaimService
 from domainhunter.publish.service import PublicationService
 from domainhunter.storage.sqlite import ConcurrentDecisionError, SQLiteStore
+
+
+_FRONTEND_DIR = Path(__file__).with_name("static")
 
 
 class ReviewDecisionRequest(BaseModel):
@@ -100,37 +105,121 @@ def build_default_contact_fetcher() -> ContactPageFetcher:
     return _BuiltinContactPageFetcher()
 
 
-def _queue_item(item: object) -> dict[str, object]:
-    candidate = item.candidate
-    version = item.latest_version
-    priority = item.priority.priority
+def _newness_payload(
+    verification: CandidateVerification | None,
+) -> dict[str, object]:
+    """Expose only the persisted CT/RDAP facts needed to assess newness."""
+    if verification is None:
+        return {
+            "status": "unknown",
+            "checked_at": None,
+            "ct_first_seen_at": None,
+            "rdap_tier": None,
+            "rdap_age_days": None,
+            "rdap_registration_at": None,
+        }
+    is_proven = (
+        verification.ct_first_seen_at is not None
+        and verification.rdap_tier in {"tier1", "tier2"}
+    )
+    is_failed = verification.rdap_tier == "unknown"
+    return {
+        "status": "passed" if is_proven else "failed" if is_failed else "unknown",
+        "checked_at": verification.checked_at.isoformat(),
+        "ct_first_seen_at": (
+            verification.ct_first_seen_at.isoformat()
+            if verification.ct_first_seen_at is not None
+            else None
+        ),
+        "rdap_tier": verification.rdap_tier,
+        "rdap_age_days": verification.rdap_age_days,
+        "rdap_registration_at": (
+            verification.rdap_registration_at.isoformat()
+            if verification.rdap_registration_at is not None
+            else None
+        ),
+    }
+
+
+def _reachability_payload(
+    verification: CandidateVerification | None,
+) -> dict[str, object]:
+    """Expose final-route facts without treating an absent check as success."""
+    if verification is None:
+        return {
+            "status": "unknown",
+            "http_status_code": None,
+            "final_url": None,
+            "canonical_url": None,
+            "same_root": None,
+        }
+    return {
+        "status": (
+            "passed"
+            if verification.final_root_matches is True
+            else "failed"
+            if verification.final_root_matches is False
+            else "unknown"
+        ),
+        "http_status_code": verification.http_status_code,
+        "final_url": verification.final_url,
+        "canonical_url": verification.canonical_url,
+        "same_root": verification.final_root_matches,
+    }
+
+
+def _review_projection(
+    *,
+    candidate: object,
+    version: object,
+    priority: object | None,
+    verification: CandidateVerification | None,
+    review_state: str,
+    canonical_url: str | None = None,
+    internal_links: tuple[str, ...] = (),
+) -> dict[str, object]:
+    """Build the shared inbox/detail representation from stored facts only."""
+    draft = version.draft
+    score = priority.priority if priority is not None else None
+    final_canonical_url = (
+        verification.canonical_url
+        if verification is not None and verification.canonical_url is not None
+        else canonical_url
+    )
     return {
         "candidate_id": candidate.candidate_id,
         "domain": candidate.domain,
         "version": version.version,
-        "author_kind": version.draft.author_kind,
-        "primary_outcome": version.draft.primary_outcome.value,
-        "classification_confidence": version.draft.classification_confidence,
-        "name_suggestion": version.draft.name_suggestion,
-        "description_suggestion": version.draft.description_suggestion,
+        "author_kind": draft.author_kind,
+        "primary_outcome": draft.primary_outcome.value,
+        "classification_confidence": draft.classification_confidence,
+        "name_suggestion": draft.name_suggestion,
+        "description_suggestion": draft.description_suggestion,
         "evidence": [
             {
                 "type": evidence.evidence_type.value,
                 "quote": evidence.quote,
                 "url": evidence.url,
             }
-            for evidence in version.draft.evidence
+            for evidence in draft.evidence
         ],
-        "canonical_url": getattr(item, "canonical_url", None),
-        "internal_links": list(getattr(item, "internal_links", ())),
-        "priority": {
-            "score": priority.score,
-            "formula_version": priority.formula_version,
-            "product_evidence_contribution": priority.product_evidence_contribution,
-            "early_presence_contribution": priority.early_presence_contribution,
-            "low_exposure_contribution": priority.low_exposure_contribution,
-            "data_completeness_contribution": priority.data_completeness_contribution,
-        },
+        "canonical_url": final_canonical_url,
+        "internal_links": list(internal_links),
+        "priority": (
+            {
+                "score": score.score,
+                "formula_version": score.formula_version,
+                "product_evidence_contribution": score.product_evidence_contribution,
+                "early_presence_contribution": score.early_presence_contribution,
+                "low_exposure_contribution": score.low_exposure_contribution,
+                "data_completeness_contribution": score.data_completeness_contribution,
+            }
+            if score is not None
+            else None
+        ),
+        "review_state": review_state,
+        "newness": _newness_payload(verification),
+        "reachability": _reachability_payload(verification),
     }
 
 
@@ -144,6 +233,7 @@ def create_app(
     """Create a process-local review API backed by the supplied SQLite database."""
     store = SQLiteStore(database_path)
     app = FastAPI(title="DomainHunter Review API", version="0.1.0")
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIR / "assets"), name="assets")
     fetcher = contact_fetcher or build_default_contact_fetcher()
     claim_service = ClaimService(store=store)
     clock = now or (lambda: datetime.now(UTC))
@@ -154,24 +244,24 @@ def create_app(
         return {"ok": True}
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    def queue_console() -> str:
-        """Queue page: KPI strip + candidate list + small Run discovery entry."""
-        return _build_page("queue", QUEUE_HTML, QUEUE_SCRIPT)
+    def queue_console() -> FileResponse:
+        """Serve the focused candidate inbox."""
+        return FileResponse(_FRONTEND_DIR / "index.html")
 
     @app.get("/review/{candidate_id}", response_class=HTMLResponse, include_in_schema=False)
-    def review_console(candidate_id: str) -> str:
+    def review_console(candidate_id: str) -> FileResponse:
         """Single-candidate review page: hero, evidence, gauge, decision buttons."""
-        return _review_page(candidate_id)
+        return FileResponse(_FRONTEND_DIR / "index.html")
 
     @app.get("/discovery", response_class=HTMLResponse, include_in_schema=False)
-    def discovery_console() -> str:
-        """Discovery control page: Run button + recent domains."""
-        return _build_page("discovery", DISCOVERY_HTML, DISCOVERY_SCRIPT)
+    def discovery_console() -> RedirectResponse:
+        """Preserve old bookmarks while keeping the inbox as the only entry point."""
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.get("/ops", response_class=HTMLResponse, include_in_schema=False)
-    def ops_console() -> str:
-        """Operations dashboard: analytics + alerts + runbook."""
-        return _build_page("ops", OPS_HTML, OPS_SCRIPT)
+    def ops_console() -> RedirectResponse:
+        """Preserve old bookmarks while keeping the inbox as the only entry point."""
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.post("/v1/run/discovery")
     async def run_discovery(payload: DiscoveryRunRequest) -> dict[str, object]:
@@ -202,9 +292,14 @@ def create_app(
                 detail=f"discovery run failed: {error}",
             ) from error
         return {
+            "status": (
+                "completed" if summary.candidates_created > 0 else "no_candidates"
+            ),
             "next_cursor": summary.next_cursor,
             "certificates_seen": summary.certificates_seen,
             "events_added": summary.events_added,
+            "roots_observed": summary.roots_observed,
+            "strict_rejections": summary.strict_rejections,
             "probes_run": summary.probes_run,
             "candidates_created": summary.candidates_created,
         }
@@ -255,12 +350,105 @@ def create_app(
 
     @app.get("/v1/review-queue")
     def list_review_queue() -> dict[str, object]:
-        items = [_queue_item(item) for item in store.list_review_queue()]
-        for payload, item in zip(items, store.list_review_queue()):
-            payload["is_approved"] = store.is_version_approved(
-                item.candidate.candidate_id, item.latest_version.version
+        """List only candidate versions that have no active human decision."""
+        items: list[dict[str, object]] = []
+        for item in store.list_review_queue():
+            candidate_id = item.candidate.candidate_id
+            candidate_version = item.latest_version.version
+            if store.active_review_action(candidate_id, candidate_version) is not None:
+                continue
+            items.append(
+                _review_projection(
+                    candidate=item.candidate,
+                    version=item.latest_version,
+                    priority=item.priority,
+                    verification=store.get_candidate_verification(
+                        candidate_id, candidate_version
+                    ),
+                    review_state="pending",
+                    canonical_url=item.canonical_url,
+                    internal_links=item.internal_links,
+                )
             )
         return {"items": items}
+
+    @app.get("/v1/candidates/{candidate_id}/versions/{candidate_version}/review-context")
+    def candidate_review_context(
+        candidate_id: str, candidate_version: int
+    ) -> dict[str, object]:
+        """Return the immutable facts and decision history for one review page."""
+        candidate = store.get_candidate(candidate_id)
+        version = store.get_candidate_version(candidate_id, candidate_version)
+        if candidate is None or version is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="candidate version not found",
+            )
+        active_action = store.active_review_action(candidate_id, candidate_version)
+        payload = _review_projection(
+            candidate=candidate,
+            version=version,
+            priority=store.latest_review_priority(candidate_id),
+            verification=store.get_candidate_verification(candidate_id, candidate_version),
+            review_state=active_action.value if active_action is not None else "pending",
+        )
+        payload["audit"] = {
+            "decisions": [
+                {
+                    "decision_id": decision.decision_id,
+                    "action": decision.action.value,
+                    "actor_id": decision.actor_id,
+                    "decided_at": decision.decided_at.isoformat(),
+                    "reason_tags": [tag.value for tag in decision.reason_tags],
+                    "revoked": store.is_decision_revoked(decision.decision_id),
+                }
+                for decision in store.list_review_decisions(candidate_id)
+                if decision.candidate_version == candidate_version
+            ]
+        }
+        return payload
+
+    @app.get("/v1/candidates/{candidate_id}/review-context")
+    def latest_candidate_review_context(candidate_id: str) -> dict[str, object]:
+        """Return the latest version's context for the independent detail route."""
+        candidate = store.get_candidate(candidate_id)
+        versions = store.list_candidate_versions(candidate_id)
+        if candidate is None or not versions:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="candidate not found",
+            )
+        version = versions[-1]
+        active_action = store.active_review_action(candidate_id, version.version)
+        latest_observation = store._latest_observation(candidate.domain)  # noqa: SLF001
+        payload = _review_projection(
+            candidate=candidate,
+            version=version,
+            priority=store.latest_review_priority(candidate_id),
+            verification=store.get_candidate_verification(candidate_id, version.version),
+            review_state=active_action.value if active_action is not None else "pending",
+            canonical_url=(
+                latest_observation.canonical_url if latest_observation is not None else None
+            ),
+            internal_links=(
+                latest_observation.internal_links if latest_observation is not None else ()
+            ),
+        )
+        payload["audit"] = {
+            "decisions": [
+                {
+                    "decision_id": decision.decision_id,
+                    "action": decision.action.value,
+                    "actor_id": decision.actor_id,
+                    "decided_at": decision.decided_at.isoformat(),
+                    "reason_tags": [tag.value for tag in decision.reason_tags],
+                    "revoked": store.is_decision_revoked(decision.decision_id),
+                }
+                for decision in store.list_review_decisions(candidate_id)
+                if decision.candidate_version == version.version
+            ]
+        }
+        return payload
 
     @app.get("/v1/metrics")
     def funnel_metrics() -> dict[str, object]:
@@ -1939,6 +2127,115 @@ _PAGE_TAIL = r"""
 </body></html>"""
 
 
+def _candidate_detail_page(candidate_id: str) -> str:
+    """Render one quiet, evidence-first candidate review page."""
+    page = r"""<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>候选详情 · DomainHunter</title>
+  <style>
+    :root { --canvas:#f7f4ed;--surface:#fff;--ink:#17202c;--muted:#5f6b7a;--line:#e1ddd5;--action:#1769e0;--verified:#007e72;--warning:#a66100;--danger:#b42318;--focus:#1d4ed8;--radius:14px; }
+    * { box-sizing:border-box; } html { background:var(--canvas); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; } body { margin:0; min-width:320px; } button,input { font:inherit; }
+    a { color:var(--action); } button:focus-visible,a:focus-visible,input:focus-visible { outline:3px solid var(--focus); outline-offset:2px; }
+    .page { max-width:960px; margin:0 auto; padding:36px 24px 116px; } .back-link { display:inline-block; color:var(--muted); text-decoration:none; margin-bottom:30px; font-weight:650; } .back-link:hover { color:var(--action); }
+    .identity { border-bottom:1px solid var(--line); padding-bottom:28px; margin-bottom:26px; } .identity-row { display:flex; justify-content:space-between; gap:16px; align-items:start; } .domain { font:750 clamp(24px,4vw,38px)/1.14 ui-monospace,"SF Mono",Menlo,Consolas,monospace; letter-spacing:-.045em; overflow-wrap:anywhere; margin:0 0 12px; } .name { font-size:19px; font-weight:710; letter-spacing:-.025em; margin:0 0 12px; } .visit-link { flex:0 0 auto; min-height:40px; display:inline-flex; align-items:center; border:1px solid #b9caea; background:#edf4ff; border-radius:8px; padding:0 12px; font-size:14px; font-weight:700; text-decoration:none; }
+    .chips { display:flex; flex-wrap:wrap; gap:8px; } .chip { display:inline-flex; min-height:26px; align-items:center; border-radius:999px; padding:2px 9px; color:#435064; background:#f0eee8; font-size:12px; font-weight:700; } .chip.priority { color:#174d9e;background:#edf4ff; } .chip.pending { color:#765500;background:#fff5e5; }.chip.decided { color:#006557;background:#e9f7f3; }
+    h2 { font-size:20px; letter-spacing:-.025em; margin:0 0 14px; } h3 { font-size:15px; margin:0 0 10px; } .evidence-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:25px; } .evidence-panel,.product-panel,.action-panel,.not-found { border:1px solid var(--line); border-radius:var(--radius); background:var(--surface); padding:20px; } .evidence-panel p,.product-panel p { color:var(--muted); line-height:1.58; margin:0; }
+    .fact-list { display:grid; gap:9px; } .fact { border-left:3px solid #d1d5db; background:#faf9f6; padding:10px 11px; border-radius:0 7px 7px 0; } .fact.passed { border-color:var(--verified); } .fact.unknown { border-color:var(--warning); } .fact.failed { border-color:var(--danger); } .fact-title { display:block; font-size:13px; font-weight:750; margin-bottom:3px; } .fact-copy { font-size:13px; color:var(--muted); line-height:1.5; }.fact-status { font-weight:750; }
+    .product-panel { margin-bottom:20px; } .quote-list { list-style:none; padding:0; margin:14px 0 0; display:grid; gap:10px; }.quote { border-top:1px solid var(--line); padding-top:10px; }.quote-text { margin:0 0 5px; color:#364152 !important; }.quote-type { color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }.quote a { font-size:13px; overflow-wrap:anywhere; }
+    details { border:1px solid var(--line); border-radius:10px; background:var(--surface); margin-bottom:22px; } summary { cursor:pointer; padding:14px 16px; font-weight:720; } pre { overflow:auto; max-height:340px; margin:0; padding:0 16px 16px; color:#364152; font:12px/1.55 ui-monospace,"SF Mono",Menlo,Consolas,monospace; white-space:pre-wrap; word-break:break-word; }
+    .action-panel { position:sticky; bottom:14px; box-shadow:0 9px 26px rgba(23,32,44,.09); }.action-copy { color:var(--muted); font-size:14px; margin:0 0 13px; }.actions { display:flex; gap:9px; flex-wrap:wrap; }.action { min-height:40px; border-radius:8px; padding:0 13px; cursor:pointer; font-weight:710; }.approve { color:white;background:var(--action);border:1px solid var(--action); }.defer { color:var(--ink);background:white;border:1px solid var(--line); }.reject { color:#8a1c14;background:#fff0ef;border:1px solid #efb6b1; }.blocklist { color:#8a1c14;background:white;border:1px solid #d88e88; }.action:disabled { opacity:.55; cursor:not-allowed; }
+    .feedback { margin:0 0 16px; padding:11px 13px; border-radius:8px; background:#fff0ef; border:1px solid #efb6b1; color:#8a1c14; font-size:14px; }.loading { min-height:230px; color:var(--muted); display:grid; place-items:center; }.not-found { text-align:center; padding:40px 20px; }.not-found p { color:var(--muted); }
+    #review-dialog { position:fixed; inset:0; z-index:10; background:rgba(23,32,44,.4); display:grid; place-items:center; padding:16px; } #review-dialog[hidden] { display:none; }.dialog-card { width:min(430px,100%); background:var(--surface); border-radius:var(--radius); padding:22px; box-shadow:0 24px 70px rgba(17,24,39,.25); }.dialog-card h2 { margin-bottom:8px; }.dialog-card p { color:var(--muted); line-height:1.55; }.dialog-card input { width:100%; min-height:42px; padding:0 11px; border:1px solid var(--line); border-radius:8px; color:var(--ink); }.dialog-actions { display:flex; justify-content:flex-end; gap:9px; margin-top:16px; }.secondary,.primary { min-height:40px; padding:0 13px; border-radius:8px; cursor:pointer; font-weight:700; }.secondary { background:white;border:1px solid var(--line);color:var(--ink); }.primary { background:var(--action);border:1px solid var(--action);color:white; }
+    @media (max-width:680px) { .page { padding:25px 16px 112px; }.identity-row { flex-direction:column; }.visit-link { margin-top:-4px; }.evidence-grid { grid-template-columns:1fr; }.evidence-panel,.product-panel,.action-panel { padding:16px; }.actions { display:grid; grid-template-columns:1fr 1fr; }.approve { grid-column:1 / -1; } }
+    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition-duration:.01ms!important; } }
+  </style>
+</head>
+<body>
+  <main class="page" data-page="candidate-detail">
+    <a class="back-link" href="/">← 返回候选收件箱</a>
+    <section id="candidate-detail" aria-live="polite"><div class="loading">正在读取候选详情…</div></section>
+    <section id="newness-evidence" aria-label="新网站证据"></section>
+    <section id="reachability-evidence" aria-label="可访问与产品证据"></section>
+    <section id="product-evidence" aria-label="产品判断"></section>
+    <details id="audit-details"><summary>查看原始审计数据</summary><pre></pre></details>
+    <section id="review-actions" aria-label="审核决定"></section>
+  </main>
+  <div id="review-dialog" role="dialog" aria-modal="true" aria-labelledby="actor-title" hidden></div>
+  <script>
+    (() => {
+      const candidateId = __CANDIDATE_ID__;
+      const $ = (selector) => document.querySelector(selector);
+      const esc = (value) => String(value ?? '').replace(/[&<>'\"]/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' })[char]);
+      const labels = { publishable_ai_saas:'AI SaaS 候选', valid_but_not_ready:'需要更多证据', not_target:'不属于目标', duplicate_or_existing:'可能为已有网站', policy_excluded:'不符合规则' };
+      const actionLabels = { approve:'批准', defer:'暂缓', reject:'拒绝', blocklist:'拉黑' };
+      const stateLabels = { pending:'待审核', approve:'已批准', defer:'已暂缓', reject:'已拒绝', blocklist:'已拉黑' };
+      const factStatus = (status) => ({ passed:'通过', unknown:'未验证', failed:'不通过' })[status] || '未验证';
+      let detail = null; let submitting = false;
+      function fact(status, title, copy) { return `<div class="fact ${esc(status || 'unknown')}"><span class="fact-title"><span class="fact-status">${esc(factStatus(status))}</span> · ${esc(title)}</span><span class="fact-copy">${esc(copy)}</span></div>`; }
+      function renderEvidence() {
+        const newness = detail.newness || {}; const reachability = detail.reachability || {};
+        const ctCopy = newness.ct_first_seen_at ? `CT 首见：${newness.ct_first_seen_at}` : '没有保存该候选版本的 CT 首见时间。';
+        const rdapCopy = newness.rdap_tier ? `RDAP 判定：${newness.rdap_tier}${Number.isFinite(newness.rdap_age_days) ? `；注册年龄 ${newness.rdap_age_days} 天` : ''}${newness.rdap_registration_at ? `；注册时间 ${newness.rdap_registration_at}` : ''}` : '没有保存 RDAP 注册信息。';
+        $('#newness-evidence').innerHTML = `<h2>为什么它进入收件箱</h2><div class="evidence-grid"><article class="evidence-panel"><h3>新网站证据</h3><div class="fact-list">${fact(newness.status, 'CT 首见与近期注册', ctCopy)}${fact(newness.status, 'RDAP 注册信息', rdapCopy)}</div></article><article class="evidence-panel"><h3>可访问性</h3><div class="fact-list">${fact(reachability.status, 'HTTP 响应', reachability.http_status_code ? `HTTP ${reachability.http_status_code}${reachability.final_url ? `；最终地址 ${reachability.final_url}` : ''}` : '没有保存 HTTP 探测结果。')}${fact(reachability.status, '最终根域名一致性', reachability.same_root === true ? '最终地址仍在该候选的根域名下。' : reachability.same_root === false ? '最终地址已离开该候选的根域名。' : '没有保存根域名一致性验证。')}</div></article></div>`;
+        const links = detail.internal_links?.length ? `<p>已发现的站内链接：${detail.internal_links.map(link => `<a href="${esc(link)}" target="_blank" rel="noopener noreferrer">${esc(link)}</a>`).join(' · ')}</p>` : '';
+        $('#reachability-evidence').innerHTML = links ? `<div class="product-panel"><h3>已发现的站内链接</h3>${links}</div>` : '';
+      }
+      function renderProduct() {
+        const evidence = detail.evidence || [];
+        const description = detail.description_suggestion ? `<p>${esc(detail.description_suggestion)}</p>` : '<p>该候选没有保存产品摘要。</p>';
+        const quotes = evidence.length ? `<ul class="quote-list">${evidence.map(item => `<li class="quote"><span class="quote-type">${esc(item.type)}</span><p class="quote-text">${esc(item.quote)}</p>${item.url ? `<a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">查看来源 ↗</a>` : ''}</li>`).join('')}</ul>` : '<p>没有保存产品引用。</p>';
+        $('#product-evidence').innerHTML = `<article class="product-panel"><h2>产品判断</h2>${description}<div class="chips"><span class="chip">${esc(labels[detail.primary_outcome] || detail.primary_outcome || '待判断')}</span>${typeof detail.classification_confidence === 'number' ? `<span class="chip">置信度 ${detail.classification_confidence.toFixed(2)}</span>` : ''}</div>${quotes}</article>`;
+      }
+      function renderActions() {
+        const section = $('#review-actions');
+        if (detail.review_state !== 'pending') { section.innerHTML = `<div class="action-panel"><h2>审核决定</h2><p class="action-copy">该候选当前状态为“${esc(stateLabels[detail.review_state] || detail.review_state)}”，不再显示待审操作。</p><a href="/" class="primary" style="display:inline-flex;align-items:center;text-decoration:none">返回候选收件箱</a></div>`; return; }
+        section.innerHTML = `<div class="action-panel"><h2>审核决定</h2><p class="action-copy">批准表示通过内部人工审核，不会自动公开发布。</p><div id="decision-feedback"></div><div class="actions">${Object.entries(actionLabels).map(([action,label]) => `<button class="action ${action}" data-action="${action}" type="button" ${submitting ? 'disabled' : ''}>${label}</button>`).join('')}</div></div>`;
+        section.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => submitDecision(button.dataset.action)));
+      }
+      function renderDetail() {
+        const priority = detail.priority && typeof detail.priority.score === 'number' ? `优先级 ${detail.priority.score.toFixed(2)}` : null;
+        const citedUrl = detail.evidence?.find(item => item.url)?.url;
+        const visitUrl = detail.canonical_url || citedUrl;
+        const external = visitUrl ? `<a class="visit-link" href="${esc(visitUrl)}" target="_blank" rel="noopener noreferrer">访问网站 ↗</a>` : '';
+        $('#candidate-detail').innerHTML = `<header class="identity"><div class="identity-row"><div><h1 class="domain">${esc(detail.domain)}</h1>${detail.name_suggestion ? `<p class="name">${esc(detail.name_suggestion)}</p>` : ''}<div class="chips"><span class="chip">${esc(labels[detail.primary_outcome] || detail.primary_outcome || '待判断')}</span>${priority ? `<span class="chip priority">${esc(priority)}</span>` : ''}<span class="chip ${detail.review_state === 'pending' ? 'pending' : 'decided'}">${esc(stateLabels[detail.review_state] || detail.review_state)}</span><span class="chip">版本 ${esc(detail.version)}</span></div></div>${external}</div></header>`;
+        renderEvidence(); renderProduct();
+        $('#audit-details pre').textContent = JSON.stringify({ candidate_id:detail.candidate_id, version:detail.version, review_state:detail.review_state, newness:detail.newness, reachability:detail.reachability, evidence:detail.evidence, audit:detail.audit }, null, 2);
+        renderActions();
+      }
+      function renderMissing(message) { $('#candidate-detail').innerHTML = `<div class="not-found"><h1>此候选目前不可审核</h1><p>${esc(message)}</p><a class="primary" href="/" style="display:inline-flex;align-items:center;text-decoration:none">返回候选收件箱</a></div>`; ['#newness-evidence','#reachability-evidence','#product-evidence','#audit-details','#review-actions'].forEach(id => $(id).hidden = true); }
+      function showFeedback(message) { const node = $('#decision-feedback'); if (node) node.innerHTML = `<p class="feedback">${esc(message)}</p>`; }
+      function requireActorId() {
+        const existing = localStorage.getItem('domainhunter.actor-id')?.trim(); if (existing) return Promise.resolve(existing);
+        const dialog = $('#review-dialog'); dialog.hidden = false; dialog.innerHTML = `<div class="dialog-card"><h2 id="actor-title">填写审核人</h2><p>审核决定会记录此名称或 ID，并仅保存在当前浏览器中供后续操作使用。</p><input id="actor-id" autocomplete="name" placeholder="例如：lonnie"><div class="dialog-actions"><button class="secondary" id="cancel-actor" type="button">取消</button><button class="primary" id="save-actor" type="button">继续</button></div></div>`;
+        return new Promise(resolve => { const finish = value => { dialog.hidden = true; dialog.innerHTML = ''; resolve(value); }; $('#cancel-actor').addEventListener('click', () => finish(null)); $('#save-actor').addEventListener('click', () => { const value = $('#actor-id').value.trim(); if (value) { localStorage.setItem('domainhunter.actor-id', value); finish(value); } else { $('#actor-id').focus(); } }); $('#actor-id').addEventListener('keydown', event => { if (event.key === 'Enter') $('#save-actor').click(); }); $('#actor-id').focus(); });
+      }
+      async function submitDecision(action) {
+        if (!detail || submitting) return; const actorId = await requireActorId(); if (!actorId) return;
+        const confirmCopy = { reject:'确定拒绝此候选吗？', blocklist:'确定拉黑此候选吗？这会阻止其继续进入审核流程。' };
+        if (confirmCopy[action] && !window.confirm(confirmCopy[action])) return;
+        submitting = true; renderActions();
+        try {
+          const response = await fetch(`/v1/candidates/${encodeURIComponent(detail.candidate_id)}/versions/${detail.version}/decisions`, { method:'POST', headers:{ 'Content-Type':'application/json', 'X-Actor-ID':actorId }, body:JSON.stringify({ request_id:crypto.randomUUID(), action, reason_tags:[] }) });
+          const body = await response.json().catch(() => ({}));
+          if (response.ok) { sessionStorage.setItem('domainhunter.flash', `${actionLabels[action]}：已记录人工审核决定。`); location.assign('/'); return; }
+          if (response.status === 401) { localStorage.removeItem('domainhunter.actor-id'); showFeedback('审核人身份需要重新输入。'); }
+          else if (response.status === 404) { renderMissing('候选已不存在或已被移出当前审核范围。'); return; }
+          else if (response.status === 409) { showFeedback('此候选已被其他操作更新。正在刷新详情。'); await loadDetail(); return; }
+          else showFeedback(`提交失败：${body.detail || `HTTP ${response.status}`}`);
+        } catch (error) { showFeedback(`提交失败：${error.message || '请求未完成'}`); }
+        finally { submitting = false; if (detail) renderActions(); }
+      }
+      async function loadDetail() { try { const response = await fetch(`/v1/candidates/${encodeURIComponent(candidateId)}/review-context`, { cache:'no-store' }); const body = await response.json().catch(() => ({})); if (response.status === 404) { renderMissing('候选不存在，或没有可读取的候选版本。'); return; } if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`); detail = body; renderDetail(); } catch (error) { $('#candidate-detail').innerHTML = `<div class="not-found"><h1>详情读取失败</h1><p>${esc(error.message || '请求未完成')}</p><button class="primary" id="retry-detail" type="button">重试</button></div>`; $('#retry-detail')?.addEventListener('click', loadDetail); ['#newness-evidence','#reachability-evidence','#product-evidence','#audit-details','#review-actions'].forEach(id => $(id).hidden = true); } }
+      loadDetail();
+    })();
+  </script>
+</body></html>"""
+    return page.replace("__CANDIDATE_ID__", json.dumps(candidate_id))
+
+
 def make_topbar(active: str, current_id: str = "") -> str:
     """Return the shared topbar with the active tab highlighted."""
     tabs = {"queue": "", "review": "", "discovery": "", "ops": ""}
@@ -1969,4 +2266,228 @@ def _build_page(active: str, body_html: str, page_script: str, current_id: str =
 
 
 def _review_page(candidate_id: str) -> str:
-    return _build_page("review", REVIEW_DETAIL_HTML, REVIEW_SCRIPT, current_id=candidate_id)
+    return _candidate_detail_page(candidate_id)
+
+
+def _inbox_page() -> str:
+    """Render the deliberately small, data-led discovery inbox."""
+    return r"""<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>候选收件箱 · DomainHunter</title>
+  <style>
+    :root {
+      --canvas: #f7f4ed; --surface: #ffffff; --ink: #17202c;
+      --muted: #5f6b7a; --line: #e1ddd5; --action: #1769e0;
+      --verified: #007e72; --warning: #a66100; --danger: #b42318;
+      --focus: #1d4ed8; --soft-blue: #edf4ff; --soft-green: #e9f7f3;
+      --soft-amber: #fff5e5; --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    html { background: var(--canvas); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    body { margin: 0; min-width: 320px; }
+    button, input { font: inherit; }
+    button, a, input { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+    .topbar { height: 56px; border-bottom: 1px solid var(--line); background: rgba(247,244,237,.94); backdrop-filter: blur(12px); position: sticky; top: 0; z-index: 5; }
+    .topbar-inner { max-width: 1080px; height: 100%; margin: 0 auto; padding: 0 24px; display: flex; align-items: center; gap: 20px; }
+    .brand { color: var(--ink); text-decoration: none; font-size: 17px; font-weight: 760; letter-spacing: -.02em; }
+    .page-name { font-size: 14px; color: var(--muted); border-left: 1px solid var(--line); padding-left: 20px; }
+    .scan-button { margin-left: auto; min-height: 40px; border: 0; border-radius: 9px; padding: 0 15px; background: var(--action); color: white; cursor: pointer; font-weight: 650; }
+    .scan-button:hover { background: #0f57bd; }
+    .layout { max-width: 960px; margin: 0 auto; padding: 48px 24px 72px; }
+    .intro { display: flex; gap: 24px; justify-content: space-between; align-items: end; margin-bottom: 32px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.12; letter-spacing: -.045em; margin-bottom: 10px; }
+    .lede { color: var(--muted); font-size: 15px; line-height: 1.6; margin: 0; }
+    .search { width: min(310px, 100%); min-height: 42px; border: 1px solid var(--line); background: var(--surface); border-radius: 9px; padding: 0 13px; color: var(--ink); }
+    .search::placeholder { color: #7b8490; }
+    .section-label { color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: .04em; margin: 34px 0 12px; }
+    .candidate-card { display: block; color: var(--ink); text-decoration: none; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 23px; transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+    .candidate-card:hover { border-color: #a9bee0; box-shadow: 0 9px 25px rgba(23,32,44,.08); transform: translateY(-1px); text-decoration: none; }
+    .candidate-card + .candidate-card { margin-top: 10px; }
+    .candidate-card--priority { border-color: #bfd2f1; padding: 28px; }
+    .card-top, .card-foot, .facts { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .card-top { justify-content: space-between; }
+    .domain { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; overflow-wrap: anywhere; font-size: 15px; font-weight: 750; }
+    .priority { border: 1px solid #b9caea; color: #174d9e; background: var(--soft-blue); border-radius: 999px; padding: 3px 9px; white-space: nowrap; font-size: 12px; font-weight: 700; }
+    .product-name { font-size: 21px; letter-spacing: -.025em; margin: 12px 0 4px; font-weight: 720; }
+    .candidate-card:not(.candidate-card--priority) .product-name { font-size: 17px; }
+    .description { color: var(--muted); line-height: 1.55; margin: 0 0 13px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .fact { display: inline-flex; align-items: center; min-height: 26px; border-radius: 6px; padding: 2px 8px; font-size: 12px; font-weight: 600; }
+    .fact.passed { color: #006557; background: var(--soft-green); }
+    .fact.unknown { color: #775600; background: var(--soft-amber); }
+    .fact.failed { color: var(--danger); background: #fff0ef; }
+    .evidence-quote { color: #364152; font-size: 14px; line-height: 1.55; margin: 15px 0 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .card-foot { justify-content: flex-end; margin-top: 16px; color: var(--action); font-size: 14px; font-weight: 700; }
+    .state-card { padding: 32px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); text-align: center; }
+    .state-card h2 { font-size: 19px; margin-bottom: 8px; }
+    .state-card p { color: var(--muted); margin-bottom: 18px; }
+    .link-button { color: var(--action); border: 0; background: none; padding: 0; cursor: pointer; font-weight: 700; text-decoration: underline; }
+    .error-banner { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; border: 1px solid #efb6b1; background: #fff0ef; border-radius: 9px; padding: 11px 13px; color: #8a1c14; font-size: 14px; }
+    .error-banner button { margin-left: auto; border: 0; background: transparent; color: inherit; cursor: pointer; font-weight: 700; text-decoration: underline; }
+    .skeleton { min-height: 156px; background: linear-gradient(90deg,#fff 25%,#f0eee8 37%,#fff 63%); background-size: 400% 100%; animation: shimmer 1.2s ease infinite; }
+    @keyframes shimmer { to { background-position: -135% 0; } }
+    dialog { max-width: 510px; width: calc(100% - 32px); padding: 0; border: 0; border-radius: var(--radius); color: var(--ink); box-shadow: 0 24px 70px rgba(17,24,39,.25); }
+    dialog::backdrop { background: rgba(23,32,44,.4); }
+    .dialog-inner { padding: 26px; }
+    .dialog-inner h2 { font-size: 22px; letter-spacing: -.03em; margin-bottom: 10px; }
+    .dialog-copy { color: var(--muted); line-height: 1.6; margin-bottom: 22px; }
+    .dialog-result { border-left: 3px solid var(--action); background: #f4f8ff; padding: 12px 13px; margin: 0 0 20px; line-height: 1.6; font-size: 14px; white-space: pre-line; }
+    .dialog-result.error { border-color: var(--danger); background: #fff0ef; color: #8a1c14; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
+    .secondary, .primary { min-height: 40px; border-radius: 8px; padding: 0 14px; cursor: pointer; font-weight: 680; }
+    .secondary { color: var(--ink); background: white; border: 1px solid var(--line); }
+    .primary { color: white; background: var(--action); border: 1px solid var(--action); }
+    .primary:disabled, .secondary:disabled, .scan-button:disabled { opacity: .55; cursor: not-allowed; }
+    #ui-status { position: fixed; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    @media (max-width: 640px) {
+      .topbar-inner { padding: 0 16px; gap: 12px; } .page-name { display: none; }
+      .scan-button { font-size: 14px; padding: 0 12px; } .layout { padding: 32px 16px 56px; }
+      .intro { align-items: stretch; flex-direction: column; gap: 16px; margin-bottom: 24px; } .search { width: 100%; }
+      .candidate-card, .candidate-card--priority { padding: 18px; } .product-name { font-size: 19px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+  </style>
+</head>
+<body>
+  <header class="topbar"><div class="topbar-inner">
+    <a class="brand" href="/">DomainHunter</a><span class="page-name">候选收件箱</span>
+    <button class="scan-button" id="open-scan" type="button">扫描新网站</button>
+  </div></header>
+  <main class="layout" data-page="inbox">
+    <div id="ui-status" aria-live="polite"></div>
+    <div class="intro">
+      <div><h1 id="inbox-summary">正在读取候选…</h1><p class="lede">仅显示通过严格新网站门槛的候选，按审核优先级排序。</p></div>
+      <label><span class="sr-only" hidden>搜索候选</span><input class="search" id="candidate-search" type="search" placeholder="搜索域名或产品" autocomplete="off"></label>
+    </div>
+    <div id="inbox-error"></div>
+    <section id="priority-section" hidden><p class="section-label">最高优先级</p><div id="priority-candidate"></div></section>
+    <section id="candidate-section" hidden><p class="section-label">其他待审核候选</p><div id="candidate-list"></div></section>
+    <section id="inbox-empty" hidden></section>
+  </main>
+  <dialog id="scan-dialog" aria-labelledby="scan-title">
+    <div class="dialog-inner">
+      <h2 id="scan-title">扫描新网站</h2>
+      <p class="dialog-copy">将从已配置的真实 CT 来源进行一次严格扫描。只保留满足新网站、可访问性和根域名一致性规则的候选。</p>
+      <div id="scan-result" hidden class="dialog-result" aria-live="polite"></div>
+      <div class="dialog-actions"><button class="secondary" id="close-scan" type="button">取消</button><button class="primary" id="start-scan" type="button">开始严格扫描</button></div>
+    </div>
+  </dialog>
+  <script>
+    (() => {
+      const stateKey = 'domainhunter.inbox';
+      const $ = (selector) => document.querySelector(selector);
+      const esc = (value) => String(value ?? '').replace(/[&<>'\"]/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' })[char]);
+      const statusText = (status) => ({ passed: '通过', failed: '不通过', unknown: '未验证' })[status] || '未验证';
+      let allCandidates = [];
+      let loadError = '';
+      let inboxState = { query: '', scrollY: 0 };
+      try { inboxState = { ...inboxState, ...JSON.parse(sessionStorage.getItem(stateKey) || '{}') }; } catch (_) { /* corrupt navigation state is disposable */ }
+      const search = $('#candidate-search');
+      search.value = inboxState.query;
+
+      function persistInboxState() {
+        sessionStorage.setItem(stateKey, JSON.stringify({ query: search.value, scrollY: window.scrollY }));
+      }
+      function flash(message) { $('#ui-status').textContent = message; }
+      function filteredCandidates() {
+        const query = search.value.trim().toLocaleLowerCase();
+        if (!query) return allCandidates;
+        return allCandidates.filter(item => [item.domain, item.name_suggestion, item.description_suggestion].some(value => String(value || '').toLocaleLowerCase().includes(query)));
+      }
+      function newnessCopy(item) {
+        const fact = item.newness || {};
+        if (fact.status === 'passed') {
+          const age = Number.isFinite(fact.rdap_age_days) ? `，RDAP 注册 ${fact.rdap_age_days} 天` : '';
+          return `新网站：CT 首见${age}`;
+        }
+        return `新网站：${statusText(fact.status)}`;
+      }
+      function reachabilityCopy(item) {
+        const fact = item.reachability || {};
+        if (fact.status === 'passed') return `可访问：HTTP ${fact.http_status_code ?? '已验证'}，根域名一致`;
+        if (fact.status === 'failed') return '可访问性：最终根域名不一致';
+        return '可访问性：未验证';
+      }
+      function candidateCard(item, priority) {
+        const score = item.priority && typeof item.priority.score === 'number' ? item.priority.score.toFixed(2) : null;
+        const evidence = item.evidence && item.evidence[0];
+        const label = item.primary_outcome === 'publishable_ai_saas' ? 'AI SaaS 候选' : item.primary_outcome || '待判断';
+        return `<a class="candidate-card ${priority ? 'candidate-card--priority' : ''}" data-candidate-id="${esc(item.candidate_id)}" href="/review/${encodeURIComponent(item.candidate_id)}" onclick="sessionStorage.setItem('domainhunter.inbox', JSON.stringify({query: document.getElementById('candidate-search').value, scrollY: window.scrollY}))">
+          <div class="card-top"><span class="domain">${esc(item.domain)}</span>${score ? `<span class="priority">优先级 ${score}</span>` : ''}</div>
+          ${item.name_suggestion ? `<div class="product-name">${esc(item.name_suggestion)}</div>` : ''}
+          <p class="description">${esc(item.description_suggestion || label)}</p>
+          <div class="facts"><span class="fact ${esc(item.newness?.status || 'unknown')}">${esc(newnessCopy(item))}</span><span class="fact ${esc(item.reachability?.status || 'unknown')}">${esc(reachabilityCopy(item))}</span></div>
+          ${evidence ? `<p class="evidence-quote">产品证据：${esc(evidence.quote)}</p>` : ''}
+          <div class="card-foot">查看证据 <span aria-hidden="true">→</span></div>
+        </a>`;
+      }
+      function renderEmpty(message, actionLabel) {
+        $('#priority-section').hidden = true; $('#candidate-section').hidden = true;
+        $('#inbox-empty').hidden = false;
+        $('#inbox-empty').innerHTML = `<div class="state-card"><h2>${esc(message)}</h2><p>${actionLabel ? '可启动一次严格扫描，从真实来源寻找新的候选。' : '请更换关键词，或清除搜索后再试。'}</p>${actionLabel ? '<button class="primary" id="empty-scan" type="button">扫描新网站</button>' : '<button class="link-button" id="clear-search" type="button">清除搜索</button>'}</div>`;
+        $('#empty-scan')?.addEventListener('click', openScan);
+        $('#clear-search')?.addEventListener('click', () => { search.value = ''; renderInbox(); search.focus(); });
+      }
+      function renderInbox() {
+        const candidates = filteredCandidates();
+        $('#inbox-summary').textContent = allCandidates.length ? `发现了 ${allCandidates.length} 个待审核候选` : '还没有可审核候选';
+        $('#inbox-error').innerHTML = loadError ? `<div class="error-banner">候选读取失败：${esc(loadError)}<button id="retry-load" type="button">重试</button></div>` : '';
+        $('#retry-load')?.addEventListener('click', loadInbox);
+        if (!candidates.length) { renderEmpty(allCandidates.length ? `没有与“${search.value.trim()}”匹配的候选` : '还没有可审核候选', allCandidates.length === 0); persistInboxState(); return; }
+        $('#inbox-empty').hidden = true;
+        $('#priority-section').hidden = false;
+        $('#priority-candidate').innerHTML = candidateCard(candidates[0], true);
+        $('#candidate-section').hidden = candidates.length < 2;
+        $('#candidate-list').innerHTML = candidates.slice(1).map(item => candidateCard(item, false)).join('');
+        persistInboxState();
+      }
+      async function loadInbox() {
+        if (!allCandidates.length) $('#priority-candidate').innerHTML = '<div class="candidate-card skeleton" aria-label="正在读取候选"></div>';
+        try {
+          const response = await fetch('/v1/review-queue', { cache: 'no-store' });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+          allCandidates = Array.isArray(body.items) ? body.items : [];
+          loadError = '';
+          renderInbox();
+          if (inboxState.scrollY) requestAnimationFrame(() => window.scrollTo(0, inboxState.scrollY));
+        } catch (error) {
+          loadError = error.message || '请求未完成';
+          if (allCandidates.length) renderInbox();
+          else { $('#inbox-summary').textContent = '候选暂时无法读取'; renderEmpty('候选暂时无法读取', false); $('#inbox-error').innerHTML = `<div class="error-banner">候选读取失败：${esc(loadError)}<button id="retry-load" type="button">重试</button></div>`; $('#retry-load')?.addEventListener('click', loadInbox); }
+          flash(`候选读取失败：${loadError}`);
+        }
+      }
+      function openScan() { const dialog = $('#scan-dialog'); if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', ''); }
+      function closeScan() { const dialog = $('#scan-dialog'); if (typeof dialog.close === 'function') dialog.close(); else dialog.removeAttribute('open'); }
+      function setScanResult(message, error) { const result = $('#scan-result'); result.hidden = false; result.classList.toggle('error', Boolean(error)); result.textContent = message; }
+      async function runScan() {
+        const start = $('#start-scan'); const close = $('#close-scan');
+        start.disabled = true; close.disabled = true; setScanResult('扫描正在运行，请保持此页面打开。', false);
+        try {
+          const response = await fetch('/v1/run/discovery', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ max_probes: 20 }) });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+          if (body.status === 'completed') {
+            setScanResult(`本次扫描已完成。\n采样信号：${body.certificates_seen ?? 0}；观察到根域名：${body.roots_observed ?? 0}；严格规则排除：${body.strict_rejections ?? 0}；实际探测：${body.probes_run ?? 0}；进入收件箱：${body.candidates_created ?? 0}。`, false);
+            close.textContent = '查看候选'; close.disabled = false; await loadInbox();
+          } else if (body.status === 'no_candidates') {
+            setScanResult(`本次扫描没有产生可审核候选。\n采样信号：${body.certificates_seen ?? 0}；观察到根域名：${body.roots_observed ?? 0}；严格规则排除：${body.strict_rejections ?? 0}；实际探测：${body.probes_run ?? 0}。`, false);
+            close.disabled = false;
+          } else { throw new Error('服务返回了未知扫描状态'); }
+        } catch (error) { setScanResult(`扫描失败：${error.message || '请求未完成'}。请重试。`, true); close.disabled = false; }
+        finally { start.disabled = false; }
+      }
+      search.addEventListener('input', renderInbox);
+      window.addEventListener('pagehide', persistInboxState);
+      $('#open-scan').addEventListener('click', openScan);
+      $('#close-scan').addEventListener('click', closeScan);
+      $('#start-scan').addEventListener('click', runScan);
+      loadInbox();
+    })();
+  </script>
+</body></html>"""

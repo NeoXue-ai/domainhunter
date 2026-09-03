@@ -33,6 +33,7 @@ from domainhunter.domain.review_priority import ReviewPriority, ReviewPrioritySn
 from domainhunter.domain.review_queue import ReviewQueueItem
 from domainhunter.domain.reviews import ReasonTag, ReviewAction, ReviewDecision
 from domainhunter.domain.work_queue import BudgetReservation, WorkLease, WorkStage
+from domainhunter.domain.verification import CandidateVerification
 from domainhunter.publish.aiknows_client import SyncStatus
 
 
@@ -138,6 +139,24 @@ CREATE TABLE IF NOT EXISTS candidate_versions (
     model_version TEXT,
     evidence_json TEXT NOT NULL,
     PRIMARY KEY (candidate_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS candidate_verifications (
+    candidate_id TEXT NOT NULL,
+    candidate_version INTEGER NOT NULL,
+    checked_at TEXT NOT NULL,
+    ct_first_seen_at TEXT,
+    rdap_tier TEXT,
+    rdap_age_days INTEGER,
+    rdap_registration_at TEXT,
+    dns_has_a INTEGER,
+    http_status_code INTEGER,
+    final_url TEXT,
+    canonical_url TEXT,
+    final_root_matches INTEGER,
+    PRIMARY KEY (candidate_id, candidate_version),
+    FOREIGN KEY (candidate_id, candidate_version)
+        REFERENCES candidate_versions(candidate_id, version)
 );
 
 CREATE TABLE IF NOT EXISTS review_decisions (
@@ -427,6 +446,16 @@ class SQLiteStore:
                 if cursor.rowcount:
                     new_count += 1
         return new_count
+
+    def get_ct_first_seen_at(self, domain: str) -> datetime | None:
+        """Return the durable first CT observation time for one root domain."""
+        normalized = normalize_hostname(domain).registrable_domain
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT first_seen_at FROM ct_seen_domains WHERE domain = ?",
+                (normalized,),
+            ).fetchone()
+        return datetime.fromisoformat(row["first_seen_at"]) if row is not None else None
 
     def is_seen(self, domain: str) -> bool:
         """Return True if the domain was ever observed in a CT log."""
@@ -739,6 +768,100 @@ class SQLiteStore:
             None,
         )
 
+    def append_candidate_verification(
+        self, verification: CandidateVerification
+    ) -> bool:
+        """Persist strict-scan facts once for an immutable candidate version."""
+        with self._connection() as connection:
+            exists = connection.execute(
+                """
+                SELECT 1 FROM candidate_versions
+                WHERE candidate_id = ? AND version = ?
+                """,
+                (verification.candidate_id, verification.candidate_version),
+            ).fetchone()
+            if exists is None:
+                raise ValueError(
+                    "verification references an unknown candidate version"
+                )
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO candidate_verifications (
+                    candidate_id, candidate_version, checked_at, ct_first_seen_at,
+                    rdap_tier, rdap_age_days, rdap_registration_at, dns_has_a,
+                    http_status_code, final_url, canonical_url, final_root_matches
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    verification.candidate_id,
+                    verification.candidate_version,
+                    verification.checked_at.isoformat(),
+                    (
+                        verification.ct_first_seen_at.isoformat()
+                        if verification.ct_first_seen_at
+                        else None
+                    ),
+                    verification.rdap_tier,
+                    verification.rdap_age_days,
+                    (
+                        verification.rdap_registration_at.isoformat()
+                        if verification.rdap_registration_at
+                        else None
+                    ),
+                    int(verification.dns_has_a)
+                    if verification.dns_has_a is not None
+                    else None,
+                    verification.http_status_code,
+                    verification.final_url,
+                    verification.canonical_url,
+                    int(verification.final_root_matches)
+                    if verification.final_root_matches is not None
+                    else None,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def get_candidate_verification(
+        self, candidate_id: str, candidate_version: int
+    ) -> CandidateVerification | None:
+        """Reload strict-scan facts for one candidate version."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM candidate_verifications
+                WHERE candidate_id = ? AND candidate_version = ?
+                """,
+                (candidate_id, candidate_version),
+            ).fetchone()
+        if row is None:
+            return None
+        return CandidateVerification(
+            candidate_id=row["candidate_id"],
+            candidate_version=row["candidate_version"],
+            checked_at=datetime.fromisoformat(row["checked_at"]),
+            ct_first_seen_at=(
+                datetime.fromisoformat(row["ct_first_seen_at"])
+                if row["ct_first_seen_at"]
+                else None
+            ),
+            rdap_tier=row["rdap_tier"],
+            rdap_age_days=row["rdap_age_days"],
+            rdap_registration_at=(
+                datetime.fromisoformat(row["rdap_registration_at"])
+                if row["rdap_registration_at"]
+                else None
+            ),
+            dns_has_a=bool(row["dns_has_a"])
+            if row["dns_has_a"] is not None
+            else None,
+            http_status_code=row["http_status_code"],
+            final_url=row["final_url"],
+            canonical_url=row["canonical_url"],
+            final_root_matches=bool(row["final_root_matches"])
+            if row["final_root_matches"] is not None
+            else None,
+        )
+
     def append_review_decision(self, decision: ReviewDecision) -> bool:
         """Append a review action once, only when its candidate version exists.
 
@@ -825,18 +948,28 @@ class SQLiteStore:
             for row in rows
         )
 
-    def is_version_approved(self, candidate_id: str, candidate_version: int) -> bool:
-        """Return whether the latest appended decision for this exact version is approval."""
+    def active_review_action(
+        self, candidate_id: str, candidate_version: int
+    ) -> ReviewAction | None:
+        """Return the latest unrevoked decision action for one exact version."""
         with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT action FROM review_decisions
                 WHERE candidate_id = ? AND candidate_version = ?
+                  AND revoked_at IS NULL
                 ORDER BY rowid DESC LIMIT 1
                 """,
                 (candidate_id, candidate_version),
             ).fetchone()
-        return row is not None and ReviewAction(row["action"]) is ReviewAction.APPROVE
+        return ReviewAction(row["action"]) if row is not None else None
+
+    def is_version_approved(self, candidate_id: str, candidate_version: int) -> bool:
+        """Return whether the current unrevoked decision is approval."""
+        return (
+            self.active_review_action(candidate_id, candidate_version)
+            is ReviewAction.APPROVE
+        )
 
     def count_approved_versions(self) -> int:
         """Count the distinct candidate versions whose latest decision is approval."""

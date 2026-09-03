@@ -9,6 +9,7 @@ __pycache__/
 *.sqlite
 *.sqlite3
 .claude/
+.superpowers/
 .gstack/
 build/
 screenshots/
@@ -16,3 +17,5 @@ screenshots/
 .vscode/
 .coverage
 htmlcov/
+frontend/node_modules/
+frontend/*.tsbuildinfo

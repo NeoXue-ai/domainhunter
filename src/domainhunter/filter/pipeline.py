@@ -105,7 +105,10 @@ class FilterPipeline:
             cached = self._cache.get(domain)
             if cached is not None:
                 age_verdicts[domain] = classify_age(
-                    cached, tier1_days=self._tier1_days, tier2_days=self._tier2_days
+                    cached,
+                    now=observed_at,
+                    tier1_days=self._tier1_days,
+                    tier2_days=self._tier2_days,
                 )
             elif self._cache.miss(domain):
                 age_verdicts[domain] = AgeVerdict(
@@ -118,7 +121,10 @@ class FilterPipeline:
                 else:
                     self._cache.record_miss(domain)
                 age_verdicts[domain] = classify_age(
-                    reg, tier1_days=self._tier1_days, tier2_days=self._tier2_days
+                    reg,
+                    now=observed_at,
+                    tier1_days=self._tier1_days,
+                    tier2_days=self._tier2_days,
                 )
 
         # S3: DNS — only for domains that pass the age gate. Unknown RDAP

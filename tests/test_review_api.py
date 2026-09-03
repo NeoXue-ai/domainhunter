@@ -127,7 +127,7 @@ def test_appends_idempotent_review_decisions_with_an_explicit_actor(tmp_path) ->
     assert store.is_version_approved(candidate.candidate_id, version.version) is True
 
 
-def test_serves_a_local_review_console_with_keyboard_actions(tmp_path) -> None:
+def test_detail_page_is_independent_and_evidence_led(tmp_path) -> None:
     database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)
     candidate, _version = _reviewable_candidate(store)
@@ -135,10 +135,8 @@ def test_serves_a_local_review_console_with_keyboard_actions(tmp_path) -> None:
     response = TestClient(create_app(database)).get(f"/review/{candidate.candidate_id}")
 
     assert response.status_code == 200
-    assert 'id="candidate-card"' in response.text
-    assert "['approve','reject','defer','blocklist']" in response.text
-    assert "keydown" in response.text
-    assert "/v1/review-queue" in response.text
+    assert 'id="root"' in response.text
+    assert '/assets/' in response.text
 
 
 def test_exposes_an_operational_funnel_snapshot(tmp_path) -> None:

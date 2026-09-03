@@ -293,6 +293,67 @@ def test_strict_mode_never_probes_a_domain_dropped_by_rdap_age(tmp_path) -> None
     assert store.is_seen("azure.com") is True
 
 
+def test_strict_mode_persists_newness_and_reachability_facts(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    poller = _make_poller(
+        store,
+        (
+            CTPage(
+                entries=(_cert("c1", "new-ai.dev"),),
+                next_cursor="c1",
+            ),
+        ),
+    )
+    registration = Registration(
+        domain="new-ai.dev",
+        registration_date=_OBSERVED - timedelta(days=5),
+        registrar="Example Registrar",
+        statuses=(),
+    )
+    strict_filter = FilterPipeline(
+        cache=MemoryCache(),
+        rdap_fetcher=lambda _domain: registration,
+        dns_checker=lambda domains: {
+            domain: DnsResult(
+                domain=domain,
+                has_a=True,
+                addresses=("203.0.113.10",),
+            )
+            for domain in domains
+        },
+        require_dns=True,
+        drop_unknown_rdap=True,
+    )
+    pipeline = DomainHunterPipeline(
+        store=store,
+        probe=_FakeProbe({"new-ai.dev": _ai_publishable("new-ai.dev")}),
+    )  # type: ignore[arg-type]
+    orchestrator = CTIngestOrchestrator(
+        store=store,
+        poller=poller,
+        pipeline=pipeline,
+        filter_pipeline=strict_filter,
+        require_first_seen=True,
+        probe_limit=10,
+    )
+
+    summary = _run(orchestrator.run_once(observed_at=_OBSERVED))
+
+    assert summary.roots_observed == 1
+    assert summary.strict_rejections == 0
+    item = store.list_review_queue()[0]
+    verification = store.get_candidate_verification(
+        item.candidate.candidate_id, item.latest_version.version
+    )
+    assert verification is not None
+    assert verification.ct_first_seen_at == _OBSERVED
+    assert verification.rdap_tier == "tier1"
+    assert verification.rdap_age_days == 5
+    assert verification.dns_has_a is True
+    assert verification.http_status_code == 200
+    assert verification.final_root_matches is True
+
+
 def test_strict_mode_rejects_cross_root_redirect_candidate(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "domainhunter.db")
     poller = _make_poller(

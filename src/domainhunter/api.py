@@ -202,9 +202,14 @@ def create_app(
                 detail=f"discovery run failed: {error}",
             ) from error
         return {
+            "status": (
+                "completed" if summary.candidates_created > 0 else "no_candidates"
+            ),
             "next_cursor": summary.next_cursor,
             "certificates_seen": summary.certificates_seen,
             "events_added": summary.events_added,
+            "roots_observed": summary.roots_observed,
+            "strict_rejections": summary.strict_rejections,
             "probes_run": summary.probes_run,
             "candidates_created": summary.candidates_created,
         }

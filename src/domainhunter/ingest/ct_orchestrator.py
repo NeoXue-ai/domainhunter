@@ -20,10 +20,11 @@ threads the live store through both layers.
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from domainhunter.filter.pipeline import FilterPipeline
+from domainhunter.filter.pipeline import FilterPipeline, FilteredCandidate
 from domainhunter.ingest.ct_poller import CTPoller
 from domainhunter.pipeline import DomainHunterPipeline
 from domainhunter.storage.sqlite import SQLiteStore
+from domainhunter.domain.verification import CandidateVerification
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,8 @@ class CTIngestRunSummary:
     probes_run: int
     candidates_created: int
     next_cursor: str | None
+    roots_observed: int = 0
+    strict_rejections: int = 0
 
 
 class CTIngestOrchestrator:
@@ -69,10 +72,18 @@ class CTIngestOrchestrator:
         domains_after = set(self._store.list_domains())
         new_roots = sorted(domains_after - domains_before)
         roots_to_probe = new_roots
+        filtered_by_domain: dict[str, FilteredCandidate] = {}
+        strict_rejections = 0
         if self._require_first_seen:
             roots_to_probe = list(self._store.filter_new(tuple(roots_to_probe)))
         if self._filter_pipeline is not None:
             filtered = self._filter_pipeline.run(roots_to_probe, observed_at=stamp)
+            strict_rejections = len(roots_to_probe) - len(filtered)
+            filtered_by_domain = {
+                candidate.domain: candidate
+                for candidate in filtered
+                if isinstance(candidate, FilteredCandidate)
+            }
             roots_to_probe = [candidate.domain for candidate in filtered]
         if self._require_first_seen:
             self._store.mark_seen(tuple(new_roots), at=stamp, source="ct")
@@ -89,10 +100,43 @@ class CTIngestOrchestrator:
             probes_run += 1
             if run.candidate_version is not None:
                 candidates_created += 1
+                filtered_candidate = filtered_by_domain.get(root)
+                if filtered_candidate is not None:
+                    self._store.append_candidate_verification(
+                        CandidateVerification(
+                            candidate_id=run.candidate_version.candidate_id,
+                            candidate_version=run.candidate_version.version,
+                            checked_at=stamp,
+                            ct_first_seen_at=self._store.get_ct_first_seen_at(root),
+                            rdap_tier=filtered_candidate.s2.tier,
+                            rdap_age_days=filtered_candidate.s2.age_days,
+                            rdap_registration_at=(
+                                filtered_candidate.s2.registration.registration_date
+                                if filtered_candidate.s2.registration
+                                else None
+                            ),
+                            dns_has_a=(
+                                filtered_candidate.s3.has_a
+                                if filtered_candidate.s3 is not None
+                                else None
+                            ),
+                            http_status_code=run.observation.status_code,
+                            final_url=run.observation.final_url,
+                            canonical_url=run.observation.canonical_url,
+                            final_root_matches=(
+                                True
+                                if self._require_first_seen
+                                and self._filter_pipeline is not None
+                                else None
+                            ),
+                        )
+                    )
         return CTIngestRunSummary(
             certificates_seen=poll_result.certificates_seen,
             events_added=poll_result.events_added,
             probes_run=probes_run,
             candidates_created=candidates_created,
             next_cursor=poll_result.next_cursor,
+            roots_observed=len(new_roots),
+            strict_rejections=strict_rejections,
         )

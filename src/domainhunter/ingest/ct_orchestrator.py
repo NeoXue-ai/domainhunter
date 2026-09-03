@@ -79,7 +79,13 @@ class CTIngestOrchestrator:
         candidates_created = 0
         probes_run = 0
         for root in roots_to_probe[: self._probe_limit]:
-            run = await self._pipeline.probe_domain(root, observed_at=stamp)
+            run = await self._pipeline.probe_domain(
+                root,
+                observed_at=stamp,
+                require_same_final_root=(
+                    self._require_first_seen and self._filter_pipeline is not None
+                ),
+            )
             probes_run += 1
             if run.candidate_version is not None:
                 candidates_created += 1

@@ -101,6 +101,18 @@ def _empty_success(domain: str) -> L1Analysis:
     )
 
 
+def _redirected_ai_publishable(final_domain: str) -> L1Analysis:
+    return L1Analysis(
+        outcome_code=OutcomeCode.SUCCESS,
+        final_url=f"https://{final_domain}",
+        title="AI Platform",
+        meta_description="AI assistant platform with free trial pricing.",
+        text_length=1200,
+        is_parking_page=False,
+        status_code=200,
+    )
+
+
 def _cert(cert_id: str, hostname: str) -> CTCertificate:
     cert_data = {
         "leaf_cert": {
@@ -279,6 +291,39 @@ def test_strict_mode_never_probes_a_domain_dropped_by_rdap_age(tmp_path) -> None
     assert summary.candidates_created == 0
     assert store.list_review_queue() == ()
     assert store.is_seen("azure.com") is True
+
+
+def test_strict_mode_rejects_cross_root_redirect_candidate(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    poller = _make_poller(
+        store,
+        (
+            CTPage(
+                entries=(_cert("c1", "fresh-redirect.com"),),
+                next_cursor="c1",
+            ),
+        ),
+    )
+    probe = _FakeProbe(
+        {"fresh-redirect.com": _redirected_ai_publishable("old-site.com")}
+    )
+    pipeline = DomainHunterPipeline(store=store, probe=probe)  # type: ignore[arg-type]
+    strict_filter = _FakeFilterPipeline({"fresh-redirect.com"})
+    orchestrator = CTIngestOrchestrator(
+        store=store,
+        poller=poller,
+        pipeline=pipeline,
+        filter_pipeline=strict_filter,
+        require_first_seen=True,
+        probe_limit=10,
+    )
+
+    summary = _run(orchestrator.run_once(observed_at=_OBSERVED))
+
+    assert summary.probes_run == 1
+    assert summary.candidates_created == 0
+    assert store.list_observations("fresh-redirect.com")[0].final_url == "https://old-site.com"
+    assert store.list_review_queue() == ()
 
 
 def test_idempotent_on_replay(tmp_path) -> None:

@@ -240,8 +240,8 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def queue_console() -> str:
-        """Queue page: KPI strip + candidate list + small Run discovery entry."""
-        return _build_page("queue", QUEUE_HTML, QUEUE_SCRIPT)
+        """Serve the focused candidate inbox."""
+        return _inbox_page()
 
     @app.get("/review/{candidate_id}", response_class=HTMLResponse, include_in_schema=False)
     def review_console(candidate_id: str) -> str:
@@ -2111,3 +2111,227 @@ def _build_page(active: str, body_html: str, page_script: str, current_id: str =
 
 def _review_page(candidate_id: str) -> str:
     return _build_page("review", REVIEW_DETAIL_HTML, REVIEW_SCRIPT, current_id=candidate_id)
+
+
+def _inbox_page() -> str:
+    """Render the deliberately small, data-led discovery inbox."""
+    return r"""<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>候选收件箱 · DomainHunter</title>
+  <style>
+    :root {
+      --canvas: #f7f4ed; --surface: #ffffff; --ink: #17202c;
+      --muted: #5f6b7a; --line: #e1ddd5; --action: #1769e0;
+      --verified: #007e72; --warning: #a66100; --danger: #b42318;
+      --focus: #1d4ed8; --soft-blue: #edf4ff; --soft-green: #e9f7f3;
+      --soft-amber: #fff5e5; --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    html { background: var(--canvas); color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    body { margin: 0; min-width: 320px; }
+    button, input { font: inherit; }
+    button, a, input { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+    .topbar { height: 56px; border-bottom: 1px solid var(--line); background: rgba(247,244,237,.94); backdrop-filter: blur(12px); position: sticky; top: 0; z-index: 5; }
+    .topbar-inner { max-width: 1080px; height: 100%; margin: 0 auto; padding: 0 24px; display: flex; align-items: center; gap: 20px; }
+    .brand { color: var(--ink); text-decoration: none; font-size: 17px; font-weight: 760; letter-spacing: -.02em; }
+    .page-name { font-size: 14px; color: var(--muted); border-left: 1px solid var(--line); padding-left: 20px; }
+    .scan-button { margin-left: auto; min-height: 40px; border: 0; border-radius: 9px; padding: 0 15px; background: var(--action); color: white; cursor: pointer; font-weight: 650; }
+    .scan-button:hover { background: #0f57bd; }
+    .layout { max-width: 960px; margin: 0 auto; padding: 48px 24px 72px; }
+    .intro { display: flex; gap: 24px; justify-content: space-between; align-items: end; margin-bottom: 32px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.12; letter-spacing: -.045em; margin-bottom: 10px; }
+    .lede { color: var(--muted); font-size: 15px; line-height: 1.6; margin: 0; }
+    .search { width: min(310px, 100%); min-height: 42px; border: 1px solid var(--line); background: var(--surface); border-radius: 9px; padding: 0 13px; color: var(--ink); }
+    .search::placeholder { color: #7b8490; }
+    .section-label { color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: .04em; margin: 34px 0 12px; }
+    .candidate-card { display: block; color: var(--ink); text-decoration: none; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 23px; transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+    .candidate-card:hover { border-color: #a9bee0; box-shadow: 0 9px 25px rgba(23,32,44,.08); transform: translateY(-1px); text-decoration: none; }
+    .candidate-card + .candidate-card { margin-top: 10px; }
+    .candidate-card--priority { border-color: #bfd2f1; padding: 28px; }
+    .card-top, .card-foot, .facts { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .card-top { justify-content: space-between; }
+    .domain { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; overflow-wrap: anywhere; font-size: 15px; font-weight: 750; }
+    .priority { border: 1px solid #b9caea; color: #174d9e; background: var(--soft-blue); border-radius: 999px; padding: 3px 9px; white-space: nowrap; font-size: 12px; font-weight: 700; }
+    .product-name { font-size: 21px; letter-spacing: -.025em; margin: 12px 0 4px; font-weight: 720; }
+    .candidate-card:not(.candidate-card--priority) .product-name { font-size: 17px; }
+    .description { color: var(--muted); line-height: 1.55; margin: 0 0 13px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .fact { display: inline-flex; align-items: center; min-height: 26px; border-radius: 6px; padding: 2px 8px; font-size: 12px; font-weight: 600; }
+    .fact.passed { color: #006557; background: var(--soft-green); }
+    .fact.unknown { color: #775600; background: var(--soft-amber); }
+    .fact.failed { color: var(--danger); background: #fff0ef; }
+    .evidence-quote { color: #364152; font-size: 14px; line-height: 1.55; margin: 15px 0 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .card-foot { justify-content: flex-end; margin-top: 16px; color: var(--action); font-size: 14px; font-weight: 700; }
+    .state-card { padding: 32px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); text-align: center; }
+    .state-card h2 { font-size: 19px; margin-bottom: 8px; }
+    .state-card p { color: var(--muted); margin-bottom: 18px; }
+    .link-button { color: var(--action); border: 0; background: none; padding: 0; cursor: pointer; font-weight: 700; text-decoration: underline; }
+    .error-banner { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; border: 1px solid #efb6b1; background: #fff0ef; border-radius: 9px; padding: 11px 13px; color: #8a1c14; font-size: 14px; }
+    .error-banner button { margin-left: auto; border: 0; background: transparent; color: inherit; cursor: pointer; font-weight: 700; text-decoration: underline; }
+    .skeleton { min-height: 156px; background: linear-gradient(90deg,#fff 25%,#f0eee8 37%,#fff 63%); background-size: 400% 100%; animation: shimmer 1.2s ease infinite; }
+    @keyframes shimmer { to { background-position: -135% 0; } }
+    dialog { max-width: 510px; width: calc(100% - 32px); padding: 0; border: 0; border-radius: var(--radius); color: var(--ink); box-shadow: 0 24px 70px rgba(17,24,39,.25); }
+    dialog::backdrop { background: rgba(23,32,44,.4); }
+    .dialog-inner { padding: 26px; }
+    .dialog-inner h2 { font-size: 22px; letter-spacing: -.03em; margin-bottom: 10px; }
+    .dialog-copy { color: var(--muted); line-height: 1.6; margin-bottom: 22px; }
+    .dialog-result { border-left: 3px solid var(--action); background: #f4f8ff; padding: 12px 13px; margin: 0 0 20px; line-height: 1.6; font-size: 14px; white-space: pre-line; }
+    .dialog-result.error { border-color: var(--danger); background: #fff0ef; color: #8a1c14; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
+    .secondary, .primary { min-height: 40px; border-radius: 8px; padding: 0 14px; cursor: pointer; font-weight: 680; }
+    .secondary { color: var(--ink); background: white; border: 1px solid var(--line); }
+    .primary { color: white; background: var(--action); border: 1px solid var(--action); }
+    .primary:disabled, .secondary:disabled, .scan-button:disabled { opacity: .55; cursor: not-allowed; }
+    #ui-status { position: fixed; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    @media (max-width: 640px) {
+      .topbar-inner { padding: 0 16px; gap: 12px; } .page-name { display: none; }
+      .scan-button { font-size: 14px; padding: 0 12px; } .layout { padding: 32px 16px 56px; }
+      .intro { align-items: stretch; flex-direction: column; gap: 16px; margin-bottom: 24px; } .search { width: 100%; }
+      .candidate-card, .candidate-card--priority { padding: 18px; } .product-name { font-size: 19px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+  </style>
+</head>
+<body>
+  <header class="topbar"><div class="topbar-inner">
+    <a class="brand" href="/">DomainHunter</a><span class="page-name">候选收件箱</span>
+    <button class="scan-button" id="open-scan" type="button">扫描新网站</button>
+  </div></header>
+  <main class="layout" data-page="inbox">
+    <div id="ui-status" aria-live="polite"></div>
+    <div class="intro">
+      <div><h1 id="inbox-summary">正在读取候选…</h1><p class="lede">仅显示通过严格新网站门槛的候选，按审核优先级排序。</p></div>
+      <label><span class="sr-only" hidden>搜索候选</span><input class="search" id="candidate-search" type="search" placeholder="搜索域名或产品" autocomplete="off"></label>
+    </div>
+    <div id="inbox-error"></div>
+    <section id="priority-section" hidden><p class="section-label">最高优先级</p><div id="priority-candidate"></div></section>
+    <section id="candidate-section" hidden><p class="section-label">其他待审核候选</p><div id="candidate-list"></div></section>
+    <section id="inbox-empty" hidden></section>
+  </main>
+  <dialog id="scan-dialog" aria-labelledby="scan-title">
+    <div class="dialog-inner">
+      <h2 id="scan-title">扫描新网站</h2>
+      <p class="dialog-copy">将从已配置的真实 CT 来源进行一次严格扫描。只保留满足新网站、可访问性和根域名一致性规则的候选。</p>
+      <div id="scan-result" hidden class="dialog-result" aria-live="polite"></div>
+      <div class="dialog-actions"><button class="secondary" id="close-scan" type="button">取消</button><button class="primary" id="start-scan" type="button">开始严格扫描</button></div>
+    </div>
+  </dialog>
+  <script>
+    (() => {
+      const stateKey = 'domainhunter.inbox';
+      const $ = (selector) => document.querySelector(selector);
+      const esc = (value) => String(value ?? '').replace(/[&<>'\"]/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' })[char]);
+      const statusText = (status) => ({ passed: '通过', failed: '不通过', unknown: '未验证' })[status] || '未验证';
+      let allCandidates = [];
+      let loadError = '';
+      let inboxState = { query: '', scrollY: 0 };
+      try { inboxState = { ...inboxState, ...JSON.parse(sessionStorage.getItem(stateKey) || '{}') }; } catch (_) { /* corrupt navigation state is disposable */ }
+      const search = $('#candidate-search');
+      search.value = inboxState.query;
+
+      function persistInboxState() {
+        sessionStorage.setItem(stateKey, JSON.stringify({ query: search.value, scrollY: window.scrollY }));
+      }
+      function flash(message) { $('#ui-status').textContent = message; }
+      function filteredCandidates() {
+        const query = search.value.trim().toLocaleLowerCase();
+        if (!query) return allCandidates;
+        return allCandidates.filter(item => [item.domain, item.name_suggestion, item.description_suggestion].some(value => String(value || '').toLocaleLowerCase().includes(query)));
+      }
+      function newnessCopy(item) {
+        const fact = item.newness || {};
+        if (fact.status === 'passed') {
+          const age = Number.isFinite(fact.rdap_age_days) ? `，RDAP 注册 ${fact.rdap_age_days} 天` : '';
+          return `新网站：CT 首见${age}`;
+        }
+        return `新网站：${statusText(fact.status)}`;
+      }
+      function reachabilityCopy(item) {
+        const fact = item.reachability || {};
+        if (fact.status === 'passed') return `可访问：HTTP ${fact.http_status_code ?? '已验证'}，根域名一致`;
+        if (fact.status === 'failed') return '可访问性：最终根域名不一致';
+        return '可访问性：未验证';
+      }
+      function candidateCard(item, priority) {
+        const score = item.priority && typeof item.priority.score === 'number' ? item.priority.score.toFixed(2) : null;
+        const evidence = item.evidence && item.evidence[0];
+        const label = item.primary_outcome === 'publishable_ai_saas' ? 'AI SaaS 候选' : item.primary_outcome || '待判断';
+        return `<a class="candidate-card ${priority ? 'candidate-card--priority' : ''}" data-candidate-id="${esc(item.candidate_id)}" href="/review/${encodeURIComponent(item.candidate_id)}" onclick="sessionStorage.setItem('domainhunter.inbox', JSON.stringify({query: document.getElementById('candidate-search').value, scrollY: window.scrollY}))">
+          <div class="card-top"><span class="domain">${esc(item.domain)}</span>${score ? `<span class="priority">优先级 ${score}</span>` : ''}</div>
+          ${item.name_suggestion ? `<div class="product-name">${esc(item.name_suggestion)}</div>` : ''}
+          <p class="description">${esc(item.description_suggestion || label)}</p>
+          <div class="facts"><span class="fact ${esc(item.newness?.status || 'unknown')}">${esc(newnessCopy(item))}</span><span class="fact ${esc(item.reachability?.status || 'unknown')}">${esc(reachabilityCopy(item))}</span></div>
+          ${evidence ? `<p class="evidence-quote">产品证据：${esc(evidence.quote)}</p>` : ''}
+          <div class="card-foot">查看证据 <span aria-hidden="true">→</span></div>
+        </a>`;
+      }
+      function renderEmpty(message, actionLabel) {
+        $('#priority-section').hidden = true; $('#candidate-section').hidden = true;
+        $('#inbox-empty').hidden = false;
+        $('#inbox-empty').innerHTML = `<div class="state-card"><h2>${esc(message)}</h2><p>${actionLabel ? '可启动一次严格扫描，从真实来源寻找新的候选。' : '请更换关键词，或清除搜索后再试。'}</p>${actionLabel ? '<button class="primary" id="empty-scan" type="button">扫描新网站</button>' : '<button class="link-button" id="clear-search" type="button">清除搜索</button>'}</div>`;
+        $('#empty-scan')?.addEventListener('click', openScan);
+        $('#clear-search')?.addEventListener('click', () => { search.value = ''; renderInbox(); search.focus(); });
+      }
+      function renderInbox() {
+        const candidates = filteredCandidates();
+        $('#inbox-summary').textContent = allCandidates.length ? `发现了 ${allCandidates.length} 个待审核候选` : '还没有可审核候选';
+        $('#inbox-error').innerHTML = loadError ? `<div class="error-banner">候选读取失败：${esc(loadError)}<button id="retry-load" type="button">重试</button></div>` : '';
+        $('#retry-load')?.addEventListener('click', loadInbox);
+        if (!candidates.length) { renderEmpty(allCandidates.length ? `没有与“${search.value.trim()}”匹配的候选` : '还没有可审核候选', allCandidates.length === 0); persistInboxState(); return; }
+        $('#inbox-empty').hidden = true;
+        $('#priority-section').hidden = false;
+        $('#priority-candidate').innerHTML = candidateCard(candidates[0], true);
+        $('#candidate-section').hidden = candidates.length < 2;
+        $('#candidate-list').innerHTML = candidates.slice(1).map(item => candidateCard(item, false)).join('');
+        persistInboxState();
+      }
+      async function loadInbox() {
+        if (!allCandidates.length) $('#priority-candidate').innerHTML = '<div class="candidate-card skeleton" aria-label="正在读取候选"></div>';
+        try {
+          const response = await fetch('/v1/review-queue', { cache: 'no-store' });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+          allCandidates = Array.isArray(body.items) ? body.items : [];
+          loadError = '';
+          renderInbox();
+          if (inboxState.scrollY) requestAnimationFrame(() => window.scrollTo(0, inboxState.scrollY));
+        } catch (error) {
+          loadError = error.message || '请求未完成';
+          if (allCandidates.length) renderInbox();
+          else { $('#inbox-summary').textContent = '候选暂时无法读取'; renderEmpty('候选暂时无法读取', false); $('#inbox-error').innerHTML = `<div class="error-banner">候选读取失败：${esc(loadError)}<button id="retry-load" type="button">重试</button></div>`; $('#retry-load')?.addEventListener('click', loadInbox); }
+          flash(`候选读取失败：${loadError}`);
+        }
+      }
+      function openScan() { const dialog = $('#scan-dialog'); if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', ''); }
+      function closeScan() { const dialog = $('#scan-dialog'); if (typeof dialog.close === 'function') dialog.close(); else dialog.removeAttribute('open'); }
+      function setScanResult(message, error) { const result = $('#scan-result'); result.hidden = false; result.classList.toggle('error', Boolean(error)); result.textContent = message; }
+      async function runScan() {
+        const start = $('#start-scan'); const close = $('#close-scan');
+        start.disabled = true; close.disabled = true; setScanResult('扫描正在运行，请保持此页面打开。', false);
+        try {
+          const response = await fetch('/v1/run/discovery', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ max_probes: 20 }) });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+          if (body.status === 'completed') {
+            setScanResult(`本次扫描已完成。\n采样信号：${body.certificates_seen ?? 0}；观察到根域名：${body.roots_observed ?? 0}；严格规则排除：${body.strict_rejections ?? 0}；实际探测：${body.probes_run ?? 0}；进入收件箱：${body.candidates_created ?? 0}。`, false);
+            close.textContent = '查看候选'; close.disabled = false; await loadInbox();
+          } else if (body.status === 'no_candidates') {
+            setScanResult(`本次扫描没有产生可审核候选。\n采样信号：${body.certificates_seen ?? 0}；观察到根域名：${body.roots_observed ?? 0}；严格规则排除：${body.strict_rejections ?? 0}；实际探测：${body.probes_run ?? 0}。`, false);
+            close.disabled = false;
+          } else { throw new Error('服务返回了未知扫描状态'); }
+        } catch (error) { setScanResult(`扫描失败：${error.message || '请求未完成'}。请重试。`, true); close.disabled = false; }
+        finally { start.disabled = false; }
+      }
+      search.addEventListener('input', renderInbox);
+      window.addEventListener('pagehide', persistInboxState);
+      $('#open-scan').addEventListener('click', openScan);
+      $('#close-scan').addEventListener('click', closeScan);
+      $('#start-scan').addEventListener('click', runScan);
+      loadInbox();
+    })();
+  </script>
+</body></html>"""

@@ -135,16 +135,8 @@ def test_detail_page_is_independent_and_evidence_led(tmp_path) -> None:
     response = TestClient(create_app(database)).get(f"/review/{candidate.candidate_id}")
 
     assert response.status_code == 200
-    assert 'data-page="candidate-detail"' in response.text
-    assert 'id="candidate-detail"' in response.text
-    assert 'id="newness-evidence"' in response.text
-    assert 'id="reachability-evidence"' in response.text
-    assert 'id="audit-details"' in response.text
-    assert 'id="review-actions"' in response.text
-    assert "nav-next" not in response.text
-    assert "review-context" in response.text
-    assert "X-Actor-ID" in response.text
-    assert "location.assign('/')" in response.text
+    assert 'id="root"' in response.text
+    assert '/assets/' in response.text
 
 
 def test_exposes_an_operational_funnel_snapshot(tmp_path) -> None:

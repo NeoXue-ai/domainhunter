@@ -17,3 +17,5 @@ screenshots/
 .vscode/
 .coverage
 htmlcov/
+frontend/node_modules/
+frontend/*.tsbuildinfo

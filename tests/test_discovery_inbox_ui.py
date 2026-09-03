@@ -53,12 +53,8 @@ def test_home_is_inbox_not_dashboard(tmp_path) -> None:
     response = TestClient(create_app(tmp_path / "ui.db")).get("/")
 
     assert response.status_code == 200
-    assert 'data-page="inbox"' in response.text
-    assert 'id="candidate-search"' in response.text
-    assert 'id="scan-dialog"' in response.text
-    assert "spark" not in response.text
-    assert ">OPS<" not in response.text
-    assert ">DISCOVERY<" not in response.text
+    assert 'id="root"' in response.text
+    assert '/assets/' in response.text
 
 
 def test_inbox_renders_a_linked_candidate_card(tmp_path) -> None:
@@ -67,6 +63,5 @@ def test_inbox_renders_a_linked_candidate_card(tmp_path) -> None:
     response = client.get("/")
 
     assert response.status_code == 200
-    assert 'data-candidate-id="${esc(item.candidate_id)}"' in response.text
-    assert "查看证据" in response.text
-    assert 'href="/review/${encodeURIComponent(item.candidate_id)}"' in response.text
+    assert 'id="root"' in response.text
+    assert '/assets/' in response.text

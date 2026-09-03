@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Protocol
 
 from fastapi import FastAPI, Header, HTTPException, Response, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from domainhunter.domain.claims import build_claim_token
@@ -29,6 +30,9 @@ from domainhunter.pipeline import DomainHunterPipeline
 from domainhunter.publish.claim_service import ClaimService
 from domainhunter.publish.service import PublicationService
 from domainhunter.storage.sqlite import ConcurrentDecisionError, SQLiteStore
+
+
+_FRONTEND_DIR = Path(__file__).with_name("static")
 
 
 class ReviewDecisionRequest(BaseModel):
@@ -229,6 +233,7 @@ def create_app(
     """Create a process-local review API backed by the supplied SQLite database."""
     store = SQLiteStore(database_path)
     app = FastAPI(title="DomainHunter Review API", version="0.1.0")
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIR / "assets"), name="assets")
     fetcher = contact_fetcher or build_default_contact_fetcher()
     claim_service = ClaimService(store=store)
     clock = now or (lambda: datetime.now(UTC))
@@ -239,14 +244,14 @@ def create_app(
         return {"ok": True}
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    def queue_console() -> str:
+    def queue_console() -> FileResponse:
         """Serve the focused candidate inbox."""
-        return _inbox_page()
+        return FileResponse(_FRONTEND_DIR / "index.html")
 
     @app.get("/review/{candidate_id}", response_class=HTMLResponse, include_in_schema=False)
-    def review_console(candidate_id: str) -> str:
+    def review_console(candidate_id: str) -> FileResponse:
         """Single-candidate review page: hero, evidence, gauge, decision buttons."""
-        return _review_page(candidate_id)
+        return FileResponse(_FRONTEND_DIR / "index.html")
 
     @app.get("/discovery", response_class=HTMLResponse, include_in_schema=False)
     def discovery_console() -> RedirectResponse:

@@ -1,6 +1,6 @@
 # DomainHunter Signal Desk — Full Frontend Design
 
-**Status:** approved direction; ready for implementation planning
+**Status:** superseded on 2026-09-03 by `2026-09-03-discovery-inbox-product-design.md`
 **Date:** 2026-09-03
 **Scope:** complete redesign of the local review console: Queue, Review, Discovery, and Ops
 **Implementation surface:** `src/domainhunter/api.py` HTML, CSS, and client-side scripts; existing HTTP endpoints and scoring rules remain unchanged.

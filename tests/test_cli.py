@@ -17,6 +17,7 @@ from domainhunter.storage.sqlite import SQLiteStore
 
 def test_cli_polls_ct_log_and_reports_due_domain(tmp_path, capsys, monkeypatch) -> None:
     """poll-ct-log invokes the orchestrator, persisting events for due domains."""
+    captured: dict[str, object] = {}
 
     class FakeFetcher:
         def __init__(self, **kwargs) -> None:
@@ -46,7 +47,20 @@ def test_cli_polls_ct_log_and_reports_due_domain(tmp_path, capsys, monkeypatch) 
                 next_cursor='{"argon": 43}',
             )
 
+    class _FilteredRoot:
+        def __init__(self, domain: str) -> None:
+            self.domain = domain
+
+    class FakeFilterPipeline:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def run(self, domains: list[str], **_kwargs) -> tuple[_FilteredRoot, ...]:
+            captured["domains"] = tuple(domains)
+            return ()
+
     monkeypatch.setattr(cli, "CTLogFetcher", FakeFetcher)
+    monkeypatch.setattr(cli, "FilterPipeline", FakeFilterPipeline)
     database = tmp_path / "domainhunter.db"
 
     assert (
@@ -67,6 +81,11 @@ def test_cli_polls_ct_log_and_reports_due_domain(tmp_path, capsys, monkeypatch) 
     imported = json.loads(capsys.readouterr().out)
     assert imported["certificates_seen"] == 1
     assert imported["events_added"] == 2
+    assert captured["domains"] == ("example.com",)
+    assert captured["tier1_days"] == 30
+    assert captured["tier2_days"] == 90
+    assert captured["require_dns"] is True
+    assert captured["drop_unknown_rdap"] is True
 
     assert (
         cli.main(

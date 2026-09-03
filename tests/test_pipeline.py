@@ -98,6 +98,120 @@ def test_projects_a_successful_product_probe_into_a_cited_review_candidate(tmp_p
     asyncio.run(run())
 
 
+def test_strict_probe_keeps_observation_but_rejects_cross_root_redirect_candidate(tmp_path) -> None:
+    html = (
+        "<title>Old Site</title>"
+        '<meta name="description" content="Existing product platform">'
+        "<p>" + ("Existing product content. " * 40) + "</p>"
+    )
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "fresh-redirect.com":
+            return httpx.Response(
+                301,
+                headers={"location": "https://old-site.com/"},
+                request=request,
+            )
+        return httpx.Response(200, text=html, request=request)
+
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    event = SourceEvent("ct_log", "nimbus:1", "fresh-redirect.com", OBSERVED_AT)
+
+    async def run() -> None:
+        async with HTTPProbe(
+            resolver=_public_resolver,
+            transport=httpx.MockTransport(responder),
+            respect_robots=False,
+        ) as probe:
+            pipeline = DomainHunterPipeline(store=store, probe=probe)
+            pipeline.ingest_event(event)
+            result = await pipeline.probe_domain(
+                "fresh-redirect.com",
+                observed_at=OBSERVED_AT,
+                require_same_final_root=True,
+            )
+
+        assert result.observation.final_url == "https://old-site.com/"
+        assert result.candidate_version is None
+        assert store.list_review_queue() == ()
+
+    asyncio.run(run())
+
+
+def test_strict_probe_rejects_cross_root_canonical_candidate(tmp_path) -> None:
+    html = (
+        '<link rel="canonical" href="https://old-site.com/">'
+        "<title>Old AI Site</title>"
+        '<meta name="description" content="AI product platform with a free trial">'
+        "<p>" + ("Existing AI product content. " * 40) + "</p>"
+    )
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    event = SourceEvent("ct_log", "nimbus:canonical", "fresh-site.com", OBSERVED_AT)
+
+    async def run() -> None:
+        async with HTTPProbe(
+            resolver=_public_resolver,
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, text=html, request=request)
+            ),
+            respect_robots=False,
+        ) as probe:
+            pipeline = DomainHunterPipeline(store=store, probe=probe)
+            pipeline.ingest_event(event)
+            result = await pipeline.probe_domain(
+                "fresh-site.com",
+                observed_at=OBSERVED_AT,
+                require_same_final_root=True,
+            )
+
+        assert result.observation.final_url == "https://fresh-site.com"
+        assert result.observation.canonical_url == "https://old-site.com/"
+        assert result.candidate_version is None
+        assert store.list_review_queue() == ()
+
+    asyncio.run(run())
+
+
+def test_strict_probe_allows_same_root_www_redirect_candidate(tmp_path) -> None:
+    html = (
+        "<title>Fresh AI</title>"
+        '<meta name="description" content="AI product platform with a free trial">'
+        "<p>" + ("Fresh AI product content. " * 40) + "</p>"
+    )
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "fresh-site.com":
+            return httpx.Response(
+                301,
+                headers={"location": "https://www.fresh-site.com/"},
+                request=request,
+            )
+        return httpx.Response(200, text=html, request=request)
+
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    event = SourceEvent("ct_log", "nimbus:2", "fresh-site.com", OBSERVED_AT)
+
+    async def run() -> None:
+        async with HTTPProbe(
+            resolver=_public_resolver,
+            transport=httpx.MockTransport(responder),
+            respect_robots=False,
+        ) as probe:
+            pipeline = DomainHunterPipeline(store=store, probe=probe)
+            pipeline.ingest_event(event)
+            result = await pipeline.probe_domain(
+                "fresh-site.com",
+                observed_at=OBSERVED_AT,
+                require_same_final_root=True,
+            )
+
+        assert result.observation.final_url == "https://www.fresh-site.com/"
+        assert result.candidate_version is not None
+        assert {item.candidate.domain for item in store.list_review_queue()} == {"fresh-site.com"}
+
+    asyncio.run(run())
+
+
 def test_probe_domain_records_canonical_and_internal_links_on_observation(tmp_path) -> None:
     html = (
         "<link rel=\"canonical\" href=\"/canonical\">"

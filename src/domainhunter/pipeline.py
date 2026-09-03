@@ -2,11 +2,12 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from urllib.parse import urlparse
 
 from domainhunter.crawler.http_probe import HTTPProbe, ProbeResult
 from domainhunter.domain.candidates import CandidateVersion, CandidateVersionDraft, Evidence
 from domainhunter.domain.events import SourceEvent
-from domainhunter.domain.normalization import normalize_hostname
+from domainhunter.domain.normalization import InvalidHostname, normalize_hostname
 from domainhunter.domain.observations import Observation
 from domainhunter.domain.retry_policy import RetryDecision, decide_next_action
 from domainhunter.domain.review_priority import ReviewPriorityInputs, calculate_review_priority
@@ -26,6 +27,18 @@ class ProbeRun:
     candidate_version: CandidateVersion | None = None
 
 
+def _final_url_matches_domain(domain: str, final_url: str | None) -> bool:
+    if final_url is None:
+        return False
+    hostname = urlparse(final_url).hostname
+    if hostname is None:
+        return False
+    try:
+        return normalize_hostname(hostname).registrable_domain == domain
+    except InvalidHostname:
+        return False
+
+
 class DomainHunterPipeline:
     """Coordinate one source event and one bounded L1 probe."""
 
@@ -37,7 +50,13 @@ class DomainHunterPipeline:
         """Persist a source event using its raw hostname as the domain signal."""
         return self._store.append_source_event(event, hostname=event.raw_subject)
 
-    async def probe_domain(self, hostname: str, *, observed_at: datetime) -> ProbeRun:
+    async def probe_domain(
+        self,
+        hostname: str,
+        *,
+        observed_at: datetime,
+        require_same_final_root: bool = False,
+    ) -> ProbeRun:
         """Probe a known domain, append its result, and calculate its next action."""
         normalized = normalize_hostname(hostname)
         prior_observations = self._store.list_observations(normalized.hostname)
@@ -59,8 +78,17 @@ class DomainHunterPipeline:
         )
         self._store.append_observation(observation)
         candidate_version: CandidateVersion | None = None
-        if probe_result.analysis is not None:
-            draft = build_rule_candidate_draft(probe_result.analysis)
+        can_create_candidate = probe_result.analysis is not None
+        if require_same_final_root:
+            can_create_candidate = can_create_candidate and _final_url_matches_domain(
+                normalized.registrable_domain, probe_result.final_url
+            )
+            if canonical_url is not None:
+                can_create_candidate = can_create_candidate and _final_url_matches_domain(
+                    normalized.registrable_domain, canonical_url
+                )
+        if can_create_candidate and analysis is not None:
+            draft = build_rule_candidate_draft(analysis)
             if draft is not None:
                 candidate = self._store.create_candidate(
                     normalized.registrable_domain, created_at=observed_at

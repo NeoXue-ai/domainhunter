@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_PY="${VENV_PY:-$REPO_ROOT/.venv/bin/python}"
 SITE_PACKAGES="$("$VENV_PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 PTH_NAME="domainhunter.pth"
@@ -58,9 +58,9 @@ fi
 if [ "$(uname -s)" = "Darwin" ]; then
     ENTRY="$REPO_ROOT/.venv/bin/domainhunter"
     SHIM="$REPO_ROOT/.venv/bin/_domainhunter_shim.sh"
-    if [ -f "$ENTRY" ] && { [ ! -f "$SHIM" ] || ! grep -q "domainhunter-install-fix" "$SHIM"; }; then
-        # 1. Write a tiny shim that chflags every .pth in purelib then execs
-        #    `python -m domainhunter.cli`. The shim is itself chmod +x.
+    if [ -f "$ENTRY" ]; then
+        # 1. Write a tiny shim that chflags every .pth in purelib then invokes
+        #    the package CLI. The shim is itself chmod +x.
         SIBLING_PY="$(dirname "$ENTRY")/python"
         cat > "$SHIM" <<EOF
 #!/usr/bin/env bash
@@ -75,25 +75,23 @@ if [ -n "\$SITE_PACKAGES" ] && [ -d "\$SITE_PACKAGES" ]; then
         chflags nohidden "\$pth" 2>/dev/null || true
     done
 fi
-exec "$SIBLING_PY" "\$@"
+exec "$SIBLING_PY" -c 'from domainhunter.cli import main; raise SystemExit(main())' "\$@"
 EOF
         chmod +x "$SHIM"
         # 2. Replace the domainhunter entry's shebang with the shim.
         #    The real Python interpreter is still passed via the env so the
         #    shim's `exec` reaches it without re-resolving PATH.
         python3 - "$ENTRY" "$SHIM" <<'PYEOF'
-import sys, os
+import sys, os, shlex
 entry, shim = sys.argv[1], sys.argv[2]
 src = open(entry).read()
-lines = src.splitlines(keepends=True)
-real_shebang = lines[0].rstrip("\n")
-rest = "".join(lines[1:])
-# Drop any prior self-heal prefix from earlier runs.
-if "domainhunter-install-fix" in rest:
-    rest = rest.split("# domainhunter-install-fix", 1)[1]
-    if rest.lstrip().startswith("\n"):
-        rest = rest.lstrip("\n")
-open(entry, "w").write(f"#!/usr/bin/env bash\n# domainhunter-install-fix\nexec {shim} {real_shebang} \"$@\"\n" + rest)
+prefix = "#!/usr/bin/env bash\n# domainhunter-install-fix\n"
+if src.startswith(prefix):
+    rest = src.split("\n", 3)[3]
+else:
+    rest = "".join(src.splitlines(keepends=True)[1:])
+quoted_shim = shlex.quote(shim)
+open(entry, "w").write(f"#!/usr/bin/env bash\n# domainhunter-install-fix\nexec {quoted_shim} \"$@\"\n" + rest)
 os.chmod(entry, 0o755)
 PYEOF
     fi

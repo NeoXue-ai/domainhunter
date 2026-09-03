@@ -67,6 +67,18 @@ def test_require_dns_drops_non_resolving() -> None:
     assert {c.domain for c in candidates} == {"resolves.com"}
 
 
+def test_require_dns_drops_a_domain_without_a_dns_result() -> None:
+    """Strict DNS mode fails closed when the resolver omits a domain."""
+    pipeline = FilterPipeline(
+        cache=MemoryCache(),
+        rdap_fetcher=_fake_rdap({"new.com": _reg(5, "new.com")}),
+        dns_checker=lambda _domains: {},
+        require_dns=True,
+    )
+
+    assert pipeline.run(["new.com"]) == ()
+
+
 def test_unknown_rdap_is_kept_tier2_by_default() -> None:
     pipeline = FilterPipeline(
         cache=MemoryCache(),

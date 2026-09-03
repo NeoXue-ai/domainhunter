@@ -948,18 +948,28 @@ class SQLiteStore:
             for row in rows
         )
 
-    def is_version_approved(self, candidate_id: str, candidate_version: int) -> bool:
-        """Return whether the latest appended decision for this exact version is approval."""
+    def active_review_action(
+        self, candidate_id: str, candidate_version: int
+    ) -> ReviewAction | None:
+        """Return the latest unrevoked decision action for one exact version."""
         with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT action FROM review_decisions
                 WHERE candidate_id = ? AND candidate_version = ?
+                  AND revoked_at IS NULL
                 ORDER BY rowid DESC LIMIT 1
                 """,
                 (candidate_id, candidate_version),
             ).fetchone()
-        return row is not None and ReviewAction(row["action"]) is ReviewAction.APPROVE
+        return ReviewAction(row["action"]) if row is not None else None
+
+    def is_version_approved(self, candidate_id: str, candidate_version: int) -> bool:
+        """Return whether the current unrevoked decision is approval."""
+        return (
+            self.active_review_action(candidate_id, candidate_version)
+            is ReviewAction.APPROVE
+        )
 
     def count_approved_versions(self) -> int:
         """Count the distinct candidate versions whose latest decision is approval."""

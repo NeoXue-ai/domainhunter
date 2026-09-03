@@ -18,6 +18,7 @@ from domainhunter.domain.observations import Observation, OutcomeCode
 from domainhunter.domain.outreach import OutreachEvent
 from domainhunter.domain.reopens import build_reopen_event
 from domainhunter.domain.reviews import ReasonTag, ReviewAction, build_review_decision
+from domainhunter.domain.verification import CandidateVerification
 from domainhunter.domain.work_queue import WorkStage
 from domainhunter.crawler.http_probe import HTTPProbe
 from domainhunter.filter.pipeline import FilterPipeline
@@ -100,37 +101,121 @@ def build_default_contact_fetcher() -> ContactPageFetcher:
     return _BuiltinContactPageFetcher()
 
 
-def _queue_item(item: object) -> dict[str, object]:
-    candidate = item.candidate
-    version = item.latest_version
-    priority = item.priority.priority
+def _newness_payload(
+    verification: CandidateVerification | None,
+) -> dict[str, object]:
+    """Expose only the persisted CT/RDAP facts needed to assess newness."""
+    if verification is None:
+        return {
+            "status": "unknown",
+            "checked_at": None,
+            "ct_first_seen_at": None,
+            "rdap_tier": None,
+            "rdap_age_days": None,
+            "rdap_registration_at": None,
+        }
+    is_proven = (
+        verification.ct_first_seen_at is not None
+        and verification.rdap_tier in {"tier1", "tier2"}
+    )
+    is_failed = verification.rdap_tier == "unknown"
+    return {
+        "status": "passed" if is_proven else "failed" if is_failed else "unknown",
+        "checked_at": verification.checked_at.isoformat(),
+        "ct_first_seen_at": (
+            verification.ct_first_seen_at.isoformat()
+            if verification.ct_first_seen_at is not None
+            else None
+        ),
+        "rdap_tier": verification.rdap_tier,
+        "rdap_age_days": verification.rdap_age_days,
+        "rdap_registration_at": (
+            verification.rdap_registration_at.isoformat()
+            if verification.rdap_registration_at is not None
+            else None
+        ),
+    }
+
+
+def _reachability_payload(
+    verification: CandidateVerification | None,
+) -> dict[str, object]:
+    """Expose final-route facts without treating an absent check as success."""
+    if verification is None:
+        return {
+            "status": "unknown",
+            "http_status_code": None,
+            "final_url": None,
+            "canonical_url": None,
+            "same_root": None,
+        }
+    return {
+        "status": (
+            "passed"
+            if verification.final_root_matches is True
+            else "failed"
+            if verification.final_root_matches is False
+            else "unknown"
+        ),
+        "http_status_code": verification.http_status_code,
+        "final_url": verification.final_url,
+        "canonical_url": verification.canonical_url,
+        "same_root": verification.final_root_matches,
+    }
+
+
+def _review_projection(
+    *,
+    candidate: object,
+    version: object,
+    priority: object | None,
+    verification: CandidateVerification | None,
+    review_state: str,
+    canonical_url: str | None = None,
+    internal_links: tuple[str, ...] = (),
+) -> dict[str, object]:
+    """Build the shared inbox/detail representation from stored facts only."""
+    draft = version.draft
+    score = priority.priority if priority is not None else None
+    final_canonical_url = (
+        verification.canonical_url
+        if verification is not None and verification.canonical_url is not None
+        else canonical_url
+    )
     return {
         "candidate_id": candidate.candidate_id,
         "domain": candidate.domain,
         "version": version.version,
-        "author_kind": version.draft.author_kind,
-        "primary_outcome": version.draft.primary_outcome.value,
-        "classification_confidence": version.draft.classification_confidence,
-        "name_suggestion": version.draft.name_suggestion,
-        "description_suggestion": version.draft.description_suggestion,
+        "author_kind": draft.author_kind,
+        "primary_outcome": draft.primary_outcome.value,
+        "classification_confidence": draft.classification_confidence,
+        "name_suggestion": draft.name_suggestion,
+        "description_suggestion": draft.description_suggestion,
         "evidence": [
             {
                 "type": evidence.evidence_type.value,
                 "quote": evidence.quote,
                 "url": evidence.url,
             }
-            for evidence in version.draft.evidence
+            for evidence in draft.evidence
         ],
-        "canonical_url": getattr(item, "canonical_url", None),
-        "internal_links": list(getattr(item, "internal_links", ())),
-        "priority": {
-            "score": priority.score,
-            "formula_version": priority.formula_version,
-            "product_evidence_contribution": priority.product_evidence_contribution,
-            "early_presence_contribution": priority.early_presence_contribution,
-            "low_exposure_contribution": priority.low_exposure_contribution,
-            "data_completeness_contribution": priority.data_completeness_contribution,
-        },
+        "canonical_url": final_canonical_url,
+        "internal_links": list(internal_links),
+        "priority": (
+            {
+                "score": score.score,
+                "formula_version": score.formula_version,
+                "product_evidence_contribution": score.product_evidence_contribution,
+                "early_presence_contribution": score.early_presence_contribution,
+                "low_exposure_contribution": score.low_exposure_contribution,
+                "data_completeness_contribution": score.data_completeness_contribution,
+            }
+            if score is not None
+            else None
+        ),
+        "review_state": review_state,
+        "newness": _newness_payload(verification),
+        "reachability": _reachability_payload(verification),
     }
 
 
@@ -260,12 +345,63 @@ def create_app(
 
     @app.get("/v1/review-queue")
     def list_review_queue() -> dict[str, object]:
-        items = [_queue_item(item) for item in store.list_review_queue()]
-        for payload, item in zip(items, store.list_review_queue()):
-            payload["is_approved"] = store.is_version_approved(
-                item.candidate.candidate_id, item.latest_version.version
+        """List only candidate versions that have no active human decision."""
+        items: list[dict[str, object]] = []
+        for item in store.list_review_queue():
+            candidate_id = item.candidate.candidate_id
+            candidate_version = item.latest_version.version
+            if store.active_review_action(candidate_id, candidate_version) is not None:
+                continue
+            items.append(
+                _review_projection(
+                    candidate=item.candidate,
+                    version=item.latest_version,
+                    priority=item.priority,
+                    verification=store.get_candidate_verification(
+                        candidate_id, candidate_version
+                    ),
+                    review_state="pending",
+                    canonical_url=item.canonical_url,
+                    internal_links=item.internal_links,
+                )
             )
         return {"items": items}
+
+    @app.get("/v1/candidates/{candidate_id}/versions/{candidate_version}/review-context")
+    def candidate_review_context(
+        candidate_id: str, candidate_version: int
+    ) -> dict[str, object]:
+        """Return the immutable facts and decision history for one review page."""
+        candidate = store.get_candidate(candidate_id)
+        version = store.get_candidate_version(candidate_id, candidate_version)
+        if candidate is None or version is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="candidate version not found",
+            )
+        active_action = store.active_review_action(candidate_id, candidate_version)
+        payload = _review_projection(
+            candidate=candidate,
+            version=version,
+            priority=store.latest_review_priority(candidate_id),
+            verification=store.get_candidate_verification(candidate_id, candidate_version),
+            review_state=active_action.value if active_action is not None else "pending",
+        )
+        payload["audit"] = {
+            "decisions": [
+                {
+                    "decision_id": decision.decision_id,
+                    "action": decision.action.value,
+                    "actor_id": decision.actor_id,
+                    "decided_at": decision.decided_at.isoformat(),
+                    "reason_tags": [tag.value for tag in decision.reason_tags],
+                    "revoked": store.is_decision_revoked(decision.decision_id),
+                }
+                for decision in store.list_review_decisions(candidate_id)
+                if decision.candidate_version == candidate_version
+            ]
+        }
+        return payload
 
     @app.get("/v1/metrics")
     def funnel_metrics() -> dict[str, object]:

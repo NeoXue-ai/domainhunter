@@ -79,6 +79,30 @@ def test_require_dns_drops_a_domain_without_a_dns_result() -> None:
     assert pipeline.run(["new.com"]) == ()
 
 
+def test_evaluate_distinguishes_retryable_readiness_from_a_terminal_old_domain() -> None:
+    pipeline = FilterPipeline(
+        cache=MemoryCache(),
+        rdap_fetcher=_fake_rdap(
+            {
+                "warming-up.com": _reg(5, "warming-up.com"),
+                "old.com": _reg(200, "old.com"),
+            }
+        ),
+        dns_checker=_fake_dns({"old.com"}),
+        require_dns=True,
+        drop_unknown_rdap=True,
+    )
+
+    decisions = {item.domain: item for item in pipeline.evaluate(["warming-up.com", "old.com"])}
+
+    assert decisions["warming-up.com"].candidate is None
+    assert decisions["warming-up.com"].retryable is True
+    assert decisions["warming-up.com"].reason == "dns_not_ready"
+    assert decisions["old.com"].candidate is None
+    assert decisions["old.com"].retryable is False
+    assert decisions["old.com"].reason == "rdap_too_old"
+
+
 def test_unknown_rdap_is_kept_tier2_by_default() -> None:
     pipeline = FilterPipeline(
         cache=MemoryCache(),

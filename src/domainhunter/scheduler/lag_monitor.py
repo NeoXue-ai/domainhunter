@@ -37,13 +37,13 @@ class _LogClientLike(Protocol):
 class LogLagMonitor:
     """Periodically compare each log's tree size with its consumed index.
 
-    The consumed index comes from ``CTMoniteur.get_state()`` (the last
-    entry index processed per log URL). The tree size comes from a
+    The consumed index comes from the direct poller's persisted state (the
+    last entry index processed per log URL). The tree size comes from a
     fresh ``fetch_tree_size()`` call per client. ``lag`` is the number
     of entries between the tail and the consumer.
 
     Args:
-        clients: The active log clients (``monitor._clients``).
+        clients: The active log clients.
         state: Callable returning the ``{log_url: last_index}`` dict.
         threshold: Lag (in entries) above which an alert is raised.
         interval: Seconds between checks.

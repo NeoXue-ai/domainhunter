@@ -4,6 +4,7 @@ import json
 import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -54,6 +55,15 @@ class ConcurrentDecisionError(Exception):
         )
         self.active_decision_id = active_decision_id
         self.active_request_id = active_request_id
+
+
+@dataclass(frozen=True, slots=True)
+class CTDiscoveryWorkLease:
+    """One exclusive, retryable unit of CT discovery work."""
+
+    domain: str
+    attempt_number: int
+    lease_token: str
 
 
 DEFAULT_DAILY_BUDGET: Mapping[WorkStage, float] = {
@@ -116,6 +126,21 @@ CREATE TABLE IF NOT EXISTS ct_seen_domains (
     first_seen_at TEXT NOT NULL,
     first_source TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ct_discovery_work (
+    domain TEXT PRIMARY KEY REFERENCES domains(domain),
+    first_observed_at TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    last_error TEXT,
+    lease_token TEXT,
+    lease_expires_at TEXT,
+    completed_at TEXT,
+    completion_reason TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ct_discovery_work_due
+    ON ct_discovery_work (completed_at, next_attempt_at, lease_expires_at, first_observed_at);
 
 CREATE TABLE IF NOT EXISTS candidates (
     candidate_id TEXT PRIMARY KEY,
@@ -346,6 +371,8 @@ class SQLiteStore:
             self._ensure_source_events_issuer_column(connection)
             self._upgrade_observations_table(connection)
             self._upgrade_review_decisions_table(connection)
+            self._upgrade_ct_discovery_work_table(connection)
+            self._backfill_ct_discovery_state(connection)
 
     @staticmethod
     def _ensure_source_events_issuer_column(connection: sqlite3.Connection) -> None:
@@ -380,6 +407,66 @@ class SQLiteStore:
             connection.execute("ALTER TABLE review_decisions ADD COLUMN revoked_by TEXT")
         if "revoke_reason" not in existing:
             connection.execute("ALTER TABLE review_decisions ADD COLUMN revoke_reason TEXT")
+
+    @staticmethod
+    def _upgrade_ct_discovery_work_table(connection: sqlite3.Connection) -> None:
+        existing = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(ct_discovery_work)").fetchall()
+        }
+        if "attempt_number" not in existing:
+            connection.execute(
+                "ALTER TABLE ct_discovery_work ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 0"
+            )
+        if "next_attempt_at" not in existing:
+            connection.execute("ALTER TABLE ct_discovery_work ADD COLUMN next_attempt_at TEXT")
+            connection.execute(
+                """
+                UPDATE ct_discovery_work
+                SET next_attempt_at = first_observed_at
+                WHERE next_attempt_at IS NULL
+                """
+            )
+        if "last_error" not in existing:
+            connection.execute("ALTER TABLE ct_discovery_work ADD COLUMN last_error TEXT")
+        if "lease_token" not in existing:
+            connection.execute("ALTER TABLE ct_discovery_work ADD COLUMN lease_token TEXT")
+        if "lease_expires_at" not in existing:
+            connection.execute("ALTER TABLE ct_discovery_work ADD COLUMN lease_expires_at TEXT")
+
+    @staticmethod
+    def _backfill_ct_discovery_state(connection: sqlite3.Connection) -> None:
+        """Recover durable CT state for events persisted before queue support.
+
+        The inserts are intentionally idempotent: current installations write both
+        records with each event, while an upgraded installation gains work and a
+        first-seen timestamp for every historical CT event exactly once.
+        """
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO ct_discovery_work (
+                domain, first_observed_at, next_attempt_at
+            )
+            SELECT event_domains.domain, MIN(source_events.observed_at),
+                   MIN(source_events.observed_at)
+            FROM event_domains
+            JOIN source_events ON source_events.id = event_domains.event_id
+            WHERE source_events.source = 'ct_log'
+            GROUP BY event_domains.domain
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO ct_seen_domains (
+                domain, first_seen_at, first_source
+            )
+            SELECT event_domains.domain, MIN(source_events.observed_at), 'ct_log'
+            FROM event_domains
+            JOIN source_events ON source_events.id = event_domains.event_id
+            WHERE source_events.source = 'ct_log'
+            GROUP BY event_domains.domain
+            """
+        )
 
     def append_source_event(self, event: SourceEvent, *, hostname: str) -> bool:
         """Append a source event exactly once and link it to a root domain."""
@@ -417,6 +504,23 @@ class SQLiteStore:
                 "INSERT INTO event_domains (event_id, domain) VALUES (?, ?)",
                 (event_id, domain),
             )
+            if event.source == "ct_log":
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO ct_discovery_work (
+                        domain, first_observed_at, next_attempt_at
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (domain, event.observed_at.isoformat(), event.observed_at.isoformat()),
+                )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO ct_seen_domains (
+                        domain, first_seen_at, first_source
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (domain, event.observed_at.isoformat(), event.source),
+                )
         return True
 
     def list_domains(self) -> tuple[str, ...]:
@@ -456,6 +560,118 @@ class SQLiteStore:
                 (normalized,),
             ).fetchone()
         return datetime.fromisoformat(row["first_seen_at"]) if row is not None else None
+
+    def list_pending_ct_discovery_domains(self, *, limit: int) -> tuple[str, ...]:
+        """Return a bounded oldest-first batch of CT roots awaiting discovery."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT domain FROM ct_discovery_work
+                WHERE completed_at IS NULL AND lease_token IS NULL
+                ORDER BY next_attempt_at, first_observed_at, domain
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return tuple(row["domain"] for row in rows)
+
+    def pending_ct_discovery_work_count(self) -> int:
+        """Count unfinished CT roots, including scheduled retries and active leases."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM ct_discovery_work WHERE completed_at IS NULL"
+            ).fetchone()
+        return int(row["count"])
+
+    def claim_ct_discovery_work(
+        self, *, now: datetime, lease_seconds: float, limit: int
+    ) -> tuple[CTDiscoveryWorkLease, ...]:
+        """Lease due CT roots once so overlapping scans cannot duplicate probes."""
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        if lease_seconds <= 0 or limit < 1:
+            raise ValueError("lease_seconds and limit must be positive")
+        lease_expires_at = now + timedelta(seconds=lease_seconds)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT domain, attempt_number FROM ct_discovery_work
+                WHERE completed_at IS NULL
+                  AND COALESCE(next_attempt_at, first_observed_at) <= ?
+                  AND (lease_token IS NULL OR lease_expires_at <= ?)
+                ORDER BY next_attempt_at, first_observed_at, domain
+                LIMIT ?
+                """,
+                (now.isoformat(), now.isoformat(), limit),
+            ).fetchall()
+            leases: list[CTDiscoveryWorkLease] = []
+            for row in rows:
+                token = uuid4().hex
+                connection.execute(
+                    """
+                    UPDATE ct_discovery_work
+                    SET attempt_number = attempt_number + 1,
+                        lease_token = ?, lease_expires_at = ?
+                    WHERE domain = ?
+                    """,
+                    (token, lease_expires_at.isoformat(), row["domain"]),
+                )
+                leases.append(
+                    CTDiscoveryWorkLease(
+                        domain=row["domain"],
+                        attempt_number=int(row["attempt_number"]) + 1,
+                        lease_token=token,
+                    )
+                )
+        return tuple(leases)
+
+    def retry_ct_discovery_work(
+        self,
+        domain: str,
+        *,
+        lease_token: str,
+        scheduled_at: datetime,
+        error: str,
+    ) -> bool:
+        """Release a failed lease so the same root is retried at a known time."""
+        if scheduled_at.tzinfo is None:
+            raise ValueError("scheduled_at must be timezone-aware")
+        if not lease_token or not error.strip():
+            raise ValueError("lease_token and error must not be empty")
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE ct_discovery_work
+                SET next_attempt_at = ?, last_error = ?,
+                    lease_token = NULL, lease_expires_at = NULL
+                WHERE domain = ? AND lease_token = ? AND completed_at IS NULL
+                """,
+                (scheduled_at.isoformat(), error, domain, lease_token),
+            )
+        return cursor.rowcount == 1
+
+    def complete_ct_discovery_domain(
+        self, domain: str, *, lease_token: str, at: datetime, reason: str
+    ) -> bool:
+        """Mark one CT root terminal only after its discovery work is complete."""
+        if at.tzinfo is None:
+            raise ValueError("at must be timezone-aware")
+        if not lease_token or not reason.strip():
+            raise ValueError("lease_token and reason must not be empty")
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE ct_discovery_work
+                SET completed_at = ?, completion_reason = ?,
+                    lease_token = NULL, lease_expires_at = NULL
+                WHERE domain = ? AND lease_token = ? AND completed_at IS NULL
+                """,
+                (at.isoformat(), reason, domain, lease_token),
+            )
+        return cursor.rowcount == 1
 
     def is_seen(self, domain: str) -> bool:
         """Return True if the domain was ever observed in a CT log."""

@@ -144,7 +144,11 @@ async def _probe_and_enrich(
             hostname=domain,
         )
         try:
-            probe_run = await domainhunter_pipeline.probe_domain(domain, observed_at=observed_at)
+            probe_run = await domainhunter_pipeline.probe_domain(
+                domain,
+                observed_at=observed_at,
+                require_same_final_root=True,
+            )
         except Exception as exc:  # noqa: BLE001 - one bad domain must not kill the batch
             outcomes.append(
                 BatchOutcome(

@@ -97,6 +97,8 @@ def test_web_discovery_requires_verified_age_and_dns_before_l1(
         "strict_rejections": 5,
         "probes_run": 3,
         "candidates_created": 1,
+        "source_errors": [],
+        "pending_work": 0,
     }
     strict_filter = captured["filter_pipeline"]
     assert strict_filter._drop_unknown_rdap is True
@@ -158,3 +160,66 @@ def test_web_discovery_calls_an_empty_strict_run_no_candidates(monkeypatch, tmp_
     assert response.status_code == 200
     assert response.json()["status"] == "no_candidates"
     assert response.json()["strict_rejections"] == 4
+
+
+def test_web_discovery_reports_queued_work_and_partial_source_failure(
+    monkeypatch, tmp_path
+) -> None:
+    """The UI API must distinguish unfinished work from an empty result."""
+
+    class _FakeFetcher:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    class _FakePoller:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    class _FakeProbeContext:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    class _FakePipeline:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    class _QueuedOrchestrator:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def run_once(self) -> CTIngestRunSummary:
+            return CTIngestRunSummary(
+                certificates_seen=6,
+                events_added=6,
+                probes_run=2,
+                candidates_created=0,
+                next_cursor="10",
+                roots_observed=6,
+                strict_rejections=1,
+                source_errors=("Nimbus endpoint timed out",),
+                pending_work=4,
+            )
+
+    monkeypatch.setattr(api, "CTLogFetcher", _FakeFetcher)
+    monkeypatch.setattr(api, "CTPoller", _FakePoller)
+    monkeypatch.setattr(api, "HTTPProbe", _FakeProbeContext)
+    monkeypatch.setattr(api, "DomainHunterPipeline", _FakePipeline)
+    monkeypatch.setattr(api, "CTIngestOrchestrator", _QueuedOrchestrator)
+
+    response = TestClient(create_app(tmp_path / "queued.db")).post(
+        "/v1/run/discovery", json={"max_probes": 5}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    assert response.json()["pending_work"] == 4
+    assert response.json()["source_errors"] == ["Nimbus endpoint timed out"]

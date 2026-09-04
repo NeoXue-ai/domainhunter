@@ -57,6 +57,16 @@ class FilteredCandidate:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class FilterDecision:
+    """One S1→S3 decision, including whether a rejection should be retried."""
+
+    domain: str
+    candidate: FilteredCandidate | None
+    retryable: bool
+    reason: str
+
+
 def _probe_payload(probe: object) -> dict[str, object]:
     """Best-effort serialization of a probe result for the review console."""
     if hasattr(probe, "as_payload"):
@@ -94,6 +104,16 @@ class FilterPipeline:
         self, domains: list[str], *, observed_at: datetime | None = None
     ) -> tuple[FilteredCandidate, ...]:
         """Run the funnel. Returns candidates that pass the age gate."""
+        return tuple(
+            decision.candidate
+            for decision in self.evaluate(domains, observed_at=observed_at)
+            if decision.candidate is not None
+        )
+
+    def evaluate(
+        self, domains: list[str], *, observed_at: datetime | None = None
+    ) -> tuple[FilterDecision, ...]:
+        """Classify every input and identify which strict rejections may recover."""
         observed_at = observed_at or datetime.now(UTC)
         s1_results: dict[str, DomainScore] = {
             domain: score_domain(domain) for domain in domains
@@ -140,9 +160,29 @@ class FilterPipeline:
         if kept:
             dns_results = self._dns_checker(kept)
 
-        candidates: list[FilteredCandidate] = []
-        for domain in kept:
+        decisions: list[FilterDecision] = []
+        for domain in domains:
             verdict = age_verdicts[domain]
+            if verdict.tier == "drop":
+                decisions.append(
+                    FilterDecision(
+                        domain=domain,
+                        candidate=None,
+                        retryable=False,
+                        reason="rdap_too_old",
+                    )
+                )
+                continue
+            if verdict.tier == "unknown" and self._drop_unknown_rdap:
+                decisions.append(
+                    FilterDecision(
+                        domain=domain,
+                        candidate=None,
+                        retryable=True,
+                        reason="rdap_unavailable",
+                    )
+                )
+                continue
             dns = dns_results.get(domain)
             final_tier = verdict.tier
             if final_tier == "unknown":
@@ -150,22 +190,36 @@ class FilterPipeline:
             reason = f"{verdict.reason}"
 
             if self._require_dns and (dns is None or not dns.has_a):
+                decisions.append(
+                    FilterDecision(
+                        domain=domain,
+                        candidate=None,
+                        retryable=True,
+                        reason="dns_not_ready",
+                    )
+                )
                 continue
             if dns is not None and not dns.has_a:
                 reason += " | no DNS"
-            candidates.append(
-                FilteredCandidate(
+            candidate = FilteredCandidate(
+                domain=domain,
+                s1=s1_results[domain],
+                s2=verdict,
+                s3=dns,
+                final_tier=final_tier,
+                reason=reason,
+                observed_at=observed_at,
+            )
+            decisions.append(
+                FilterDecision(
                     domain=domain,
-                    s1=s1_results[domain],
-                    s2=verdict,
-                    s3=dns,
-                    final_tier=final_tier,
+                    candidate=candidate,
+                    retryable=False,
                     reason=reason,
-                    observed_at=observed_at,
                 )
             )
 
-        return tuple(candidates)
+        return tuple(decisions)
 
     async def run_with_probe(
         self,

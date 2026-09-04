@@ -38,7 +38,7 @@ def _llm_draft() -> CandidateVersionDraft:
 
 
 class FakeMonitor:
-    """Fake CTMoniteur: yields fixed domains via callback after start."""
+    """Fake callback monitor: yields fixed domains after start."""
 
     def __init__(self, callback, *, domains: tuple[str, ...]) -> None:
         self._callback = callback
@@ -160,3 +160,29 @@ def test_daemon_run_stops_on_signal(tmp_path) -> None:
 
     asyncio.run(run())
     assert daemon.round >= 1
+
+
+def test_daemon_round_failure_includes_the_cause_and_traceback(tmp_path, caplog) -> None:
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+
+    def monitor_factory(*, callback):
+        del callback
+        raise RuntimeError("monitor import failed")
+
+    daemon = DiscoveryDaemon(
+        store=store,
+        provider=MockLLMProvider(draft=_llm_draft()),
+        monitor_factory=monitor_factory,
+        collect_seconds=0.01,
+        round_seconds=0.01,
+        clock=lambda: NOW,
+    )
+
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="domainhunter.discovery"):
+        asyncio.run(daemon.run(max_rounds=1))
+
+    record = next(record for record in caplog.records if record.message.startswith("discovery.round.failed"))
+    assert "monitor import failed" in record.getMessage()
+    assert record.exc_info is not None

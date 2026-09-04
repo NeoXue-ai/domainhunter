@@ -24,6 +24,7 @@ class CTPage:
 
     entries: tuple[CTCertificate, ...]
     next_cursor: str | None
+    source_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,7 @@ class CTPollResult:
     certificates_seen: int
     events_seen: int
     events_added: int
+    source_errors: tuple[str, ...] = ()
 
 
 CTPageFetcher = Callable[[str | None], Awaitable[CTPage]]
@@ -72,4 +74,5 @@ class CTPoller:
             certificates_seen=len(page.entries),
             events_seen=events_seen,
             events_added=events_added,
+            source_errors=page.source_errors,
         )

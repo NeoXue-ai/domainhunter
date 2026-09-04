@@ -3,8 +3,7 @@
 The discovery daemon automates the whole newborn-domain pipeline on a
 loop, so no manual ``filter-enrich`` runs are needed in production:
 
-1. Collect domains from all public CT logs for a bounded window
-   (via :class:`ct_moniteur.CTMoniteur` watching from the current tail).
+1. Collect domains from an injected CT source for a bounded window.
 2. Deduplicate against the ``ct_seen_domains`` table (first-seen).
 3. Run the S1→S5 funnel (filter → probe → LLM classify) on fresh domains.
 4. Mark everything collected as seen, so the next round only processes
@@ -82,9 +81,10 @@ class DiscoveryDaemon:
             try:
                 await self._round_once(at_time=at_time)
             except Exception as error:  # noqa: BLE001 - never kill the loop
-                _LOGGER.error(
-                    "discovery.round.failed",
-                    extra={"round": self._round, "error": str(error)},
+                _LOGGER.exception(
+                    "discovery.round.failed [round=%d, error=%s]",
+                    self._round,
+                    str(error) or type(error).__name__,
                 )
 
             if max_rounds is not None and self._round >= max_rounds:
@@ -148,7 +148,8 @@ class DiscoveryDaemon:
     async def _collect_domains(self) -> tuple[str, ...]:
         """Watch CT logs for ``collect_seconds`` and return all seen domains.
 
-        Uses the injected ``monitor_factory`` (a ``CTMoniteur``-like object).
+        Uses the injected ``monitor_factory`` (an object with ``start`` and
+        ``stop`` coroutines that calls the supplied callback).
         """
         seen: set[str] = set()
 

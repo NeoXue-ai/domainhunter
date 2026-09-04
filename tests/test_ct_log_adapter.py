@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from domainhunter.ingest.ct_log_adapter import (
+    DEFAULT_LOG,
     CTLogFetcher,
     CTLogTarget,
     _format_cursor,
@@ -71,6 +72,13 @@ def _handler(size: int, leaf: str):
 
 def _log() -> CTLogTarget:
     return CTLogTarget("test", "https://ct.example.test")
+
+
+def test_default_log_uses_cloudflare_nimbus() -> None:
+    assert DEFAULT_LOG == CTLogTarget(
+        "cloudflare-nimbus2026",
+        "https://ct.cloudflare.com/logs/nimbus2026",
+    )
 
 
 def test_parse_leaf_input_extracts_cn_and_san() -> None:
@@ -153,3 +161,34 @@ def test_fetcher_requires_unique_log_ids() -> None:
 
     with pytest.raises(ValueError):
         CTLogFetcher(logs=(_log(), _log()))
+
+
+def test_fetcher_keeps_healthy_logs_moving_when_another_source_fails() -> None:
+    leaf = _x509_leaf_input(_make_cert())
+    healthy = CTLogTarget("healthy", "https://healthy.example.test")
+    failing = CTLogTarget("failing", "https://failing.example.test")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "failing.example.test":
+            return httpx.Response(503)
+        return _handler(1, leaf)(request)
+
+    fetcher = CTLogFetcher(
+        logs=(healthy, failing),
+        transport=httpx.MockTransport(handler),
+        catchup_entries=1,
+        max_retries=1,
+        sleep=lambda _: None,
+    )
+
+    import asyncio
+
+    async def run() -> None:
+        page = await fetcher(None)
+        assert [entry.source_event_id for entry in page.entries] == ["healthy:0"]
+        assert page.source_errors == (
+            "failing: /ct/v1/get-sth unreachable after 1 attempts: "
+            "failing: /ct/v1/get-sth retryable status=503",
+        )
+
+    asyncio.run(run())

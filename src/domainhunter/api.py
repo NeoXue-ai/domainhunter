@@ -293,7 +293,11 @@ def create_app(
             ) from error
         return {
             "status": (
-                "completed" if summary.candidates_created > 0 else "no_candidates"
+                "completed"
+                if summary.candidates_created > 0
+                else "queued"
+                if summary.pending_work > 0
+                else "no_candidates"
             ),
             "next_cursor": summary.next_cursor,
             "certificates_seen": summary.certificates_seen,
@@ -302,6 +306,8 @@ def create_app(
             "strict_rejections": summary.strict_rejections,
             "probes_run": summary.probes_run,
             "candidates_created": summary.candidates_created,
+            "source_errors": list(summary.source_errors),
+            "pending_work": summary.pending_work,
         }
 
     @app.get("/v1/discovery/overview")

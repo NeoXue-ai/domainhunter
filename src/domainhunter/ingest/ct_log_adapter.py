@@ -49,8 +49,8 @@ class CTLogTarget:
 
 
 DEFAULT_LOG = CTLogTarget(
-    log_id="google-argon2026h1",
-    base_url="https://ct.googleapis.com/logs/us1/argon2026h1",
+    log_id="cloudflare-nimbus2026",
+    base_url="https://ct.cloudflare.com/logs/nimbus2026",
 )
 
 RETRY_BACKOFF_SECONDS: tuple[float, ...] = (1.0, 2.0, 4.0)
@@ -250,9 +250,22 @@ class CTLogFetcher:
     async def __call__(self, cursor: str | None) -> CTPage:
         state = _parse_cursors(cursor)
         entries: list[CTCertificate] = []
+        source_errors: list[str] = []
+        successful_logs = 0
         for log in self._logs:
-            entries.extend(await self._poll_log(log, state))
-        return CTPage(entries=tuple(entries), next_cursor=_format_cursor(state))
+            try:
+                entries.extend(await self._poll_log(log, state))
+            except CTLogFetchError as error:
+                source_errors.append(str(error))
+            else:
+                successful_logs += 1
+        if successful_logs == 0:
+            raise CTLogFetchError("; ".join(source_errors))
+        return CTPage(
+            entries=tuple(entries),
+            next_cursor=_format_cursor(state),
+            source_errors=tuple(source_errors),
+        )
 
     async def _poll_log(self, log: CTLogTarget, state: dict[str, int]) -> list[CTCertificate]:
         tree_size = await self._get_sth(log)

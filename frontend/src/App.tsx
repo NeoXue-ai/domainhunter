@@ -43,7 +43,8 @@ const DICT = {
     priorityValue: "优先级",
     searchPlaceholder: "过滤域名、指标或产品特征... (按 / 聚焦)",
     inboxCount: "{n} 个待决标的正在队列",
-    inboxSubtitle: "实时 CT 日志管道 · 严格根域准入 · 延迟与连通性自检就绪",
+    inboxSubtitle: "已配置 CT 日志 · 严格根域准入 · 可执行连通性核验",
+    pipelineGate: "STRICT_GATE_ENABLED",
     newnessFact: "CT 首次见网",
     reachabilityFact: "HTTP/TLS 状态",
     viewEvidence: "打开诊断卷宗",
@@ -69,9 +70,9 @@ const DICT = {
     submitting: "COMMITTING...",
     approving: "STAMPING...",
     emptyTitle: "队列全部清空 (PIPELINE IDLE)",
-    emptyDesc: "当前无挂起待审目标。可随时向主干 CT 流注入全量探针任务。",
+    emptyDesc: "当前无挂起待审目标。可随时开始一次严格的 CT 实时扫描。",
     scanModalTitle: "DISPATCH PROBES // 启动严格网络探针",
-    scanModalDesc: "从公共证书透明度日志实时打捞 48 小时内全新签发记录，对根域直连执行多区域存活判定。",
+    scanModalDesc: "从已配置的公共证书透明度日志拉取新记录，并对根域执行严格的新网站性、解析与可访问性核验。",
     scanRuleHeading: "硬件级过滤网关已常驻",
     scanRuleDesc: "强制剔除通配符泛停放、CDN 默认模板页及跨域 Redirect 链。",
     cancel: "取消",
@@ -79,11 +80,18 @@ const DICT = {
     scanningTitle: "正在与边缘分布式探针同步数据...",
     scanningDesc: "正在执行 TLS 1.3 真实握手与 HTTP 存活性测试",
     scanSuccess: "PROBE COMPLETED // 探针成功生成凭据",
+    scanQueued: "PROBE QUEUED // 严格核验仍在队列中",
+    scanNoCandidates: "PROBE COMPLETE // 本轮没有通过严格准入的候选",
     scanFailed: "PROBE TERMINATED // 探测被物理中断",
     statSampled: "采样信号",
     statDomains: "排重根域",
     statStrictRejections: "严格过滤",
     statCreated: "准入建档",
+    statPendingWork: "待续处理",
+    queuedWork: "本轮仍有 {n} 个根域等待严格核验；再次扫描会从队列继续。",
+    noCandidatesDesc: "本轮信号已完成严格筛选，没有任何域名被当作候选推入审核队列。",
+    partialSourceFailure: "部分 CT 来源未响应；其余健康来源已继续处理。",
+    continueScan: "继续扫描",
     viewNewCandidates: "检阅新资产",
     retry: "重新轮询",
     actorModalTitle: "配置操作员标识 (OPERATOR ID)",
@@ -108,7 +116,8 @@ const DICT = {
     priorityValue: "Priority",
     searchPlaceholder: "Filter by apex, metrics, or intent... (Press / to focus)",
     inboxCount: "{n} targets pending review",
-    inboxSubtitle: "Live CT Stream · Strict Ingress Rules · Telemetry Probes Ready",
+    inboxSubtitle: "Configured CT Logs · Strict Ingress Rules · Reachability Checks Available",
+    pipelineGate: "STRICT_GATE_ENABLED",
     newnessFact: "CT Genesis",
     reachabilityFact: "HTTP/TLS State",
     viewEvidence: "Open Telemetry",
@@ -134,9 +143,9 @@ const DICT = {
     submitting: "COMMITTING...",
     approving: "STAMPING...",
     emptyTitle: "PIPELINE IDLE // Queue Clear",
-    emptyDesc: "No unresolved candidates in stream. Dispatch a live probe to poll edge CT queues.",
+    emptyDesc: "No unresolved candidates in stream. Start a strict live CT scan at any time.",
     scanModalTitle: "DISPATCH PROBES // Edge Discovery",
-    scanModalDesc: "Pulls real-time certificate issuance records within 48h and validates transit latency.",
+    scanModalDesc: "Polls new records from configured public Certificate Transparency logs and strictly verifies age, DNS, and apex reachability.",
     scanRuleHeading: "Hardware-level Gate Enabled",
     scanRuleDesc: "Instantly drops wildcard parking, CDN template pages, and redirect loops.",
     cancel: "Cancel",
@@ -144,11 +153,18 @@ const DICT = {
     scanningTitle: "Synchronizing socket events with edge probe nodes...",
     scanningDesc: "Executing TLS 1.3 handshakes without synthetic latency",
     scanSuccess: "PROBE COMPLETED // Signals Filed",
+    scanQueued: "PROBE QUEUED // Strict checks remain in queue",
+    scanNoCandidates: "PROBE COMPLETE // No candidate passed strict admission",
     scanFailed: "PROBE TERMINATED // Socket Fault",
     statSampled: "Sampled",
     statDomains: "Unique Apex",
     statStrictRejections: "Strict Filtered",
     statCreated: "Ingested",
+    statPendingWork: "Pending Work",
+    queuedWork: "{n} apex domains still await strict verification. The next scan resumes this queue.",
+    noCandidatesDesc: "This run completed strict screening; no domain was admitted to the review queue.",
+    partialSourceFailure: "Some CT sources did not respond; healthy sources continued processing.",
+    continueScan: "Continue Scan",
     viewNewCandidates: "Inspect Targets",
     retry: "Retry Probe",
     actorModalTitle: "Set Operator Handle (OPERATOR ID)",
@@ -217,12 +233,14 @@ export interface CandidateDetail extends CandidateSummary {
 }
 
 export interface ScanResult {
-  status: "completed" | "no_candidates" | "failed";
+  status: "completed" | "queued" | "no_candidates" | "failed";
   sampledSignals?: number;
   distinctDomains?: number;
   strictRejections?: number;
   probesRun?: number;
   candidatesCreated?: number;
+  pendingWork?: number;
+  sourceErrors?: string[];
   errorSummary?: string;
 }
 
@@ -419,7 +437,16 @@ const liveApi = {
     const response = await fetch("/v1/run/discovery", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_probes: 20 }) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
-    return { status: body.status, sampledSignals: body.certificates_seen, distinctDomains: body.roots_observed, strictRejections: body.strict_rejections, probesRun: body.probes_run, candidatesCreated: body.candidates_created };
+    return {
+      status: body.status,
+      sampledSignals: body.certificates_seen,
+      distinctDomains: body.roots_observed,
+      strictRejections: body.strict_rejections,
+      probesRun: body.probes_run,
+      candidatesCreated: body.candidates_created,
+      pendingWork: body.pending_work,
+      sourceErrors: body.source_errors,
+    };
   },
   async submitReview(id: string, action: ReviewAction, actorId: string, version: number): Promise<void> {
     const response = await fetch(`/v1/candidates/${encodeURIComponent(id)}/versions/${version}/decisions`, { method: "POST", headers: { "Content-Type": "application/json", "X-Actor-ID": actorId }, body: JSON.stringify({ request_id: crypto.randomUUID(), action, reason_tags: [] }) });
@@ -480,11 +507,13 @@ const ConsoleBadge: React.FC<{ status: EvidenceStatus; text?: string; lang: Lang
   );
 };
 
-const ScanResultHUD: React.FC<{ result: ScanResult }> = ({ result }) => {
+const ScanResultHUD: React.FC<{ result: ScanResult; lang: Language }> = ({ result, lang }) => {
   const sampled = useCounter(result.sampledSignals || 0, 600);
   const domains = useCounter(result.distinctDomains || 0, 600);
   const rejections = useCounter(result.strictRejections || 0, 600);
   const created = useCounter(result.candidatesCreated || 0, 600);
+  const pending = useCounter(result.pendingWork || 0, 600);
+  const d = DICT[lang];
 
   return (
     <div className="grid grid-cols-2 gap-2 font-mono text-xs">
@@ -504,6 +533,42 @@ const ScanResultHUD: React.FC<{ result: ScanResult }> = ({ result }) => {
         <div className="text-emerald-700 dark:text-emerald-400 text-[10px] tracking-wider uppercase font-bold">INGESTED</div>
         <div className="text-base font-bold text-emerald-600 dark:text-emerald-300 mt-1">+{created}</div>
       </div>
+      {(result.pendingWork || 0) > 0 && (
+        <div className="col-span-2 p-3 bg-amber-500/10 border border-amber-500/40 rounded-md">
+          <div className="text-amber-700 dark:text-amber-400 text-[10px] tracking-wider uppercase font-bold">{d.statPendingWork}</div>
+          <div className="text-base font-bold text-amber-700 dark:text-amber-300 mt-1">{pending}</div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const ScanRunNotices: React.FC<{ result: ScanResult; lang: Language }> = ({ result, lang }) => {
+  const d = DICT[lang];
+  const pendingWork = result.pendingWork || 0;
+  const sourceErrors = result.sourceErrors || [];
+
+  if (pendingWork === 0 && sourceErrors.length === 0) return null;
+
+  return (
+    <div className="space-y-2 text-[11px] font-sans leading-relaxed">
+      {pendingWork > 0 && (
+        <div className="flex gap-2 p-3 bg-blue-50 dark:bg-blue-950/25 border border-blue-200 dark:border-blue-900/70 rounded-md text-blue-800 dark:text-blue-200">
+          <Activity className="w-3.5 h-3.5 mt-0.5 shrink-0 text-blue-500" />
+          <span>{d.queuedWork.replace("{n}", String(pendingWork))}</span>
+        </div>
+      )}
+      {sourceErrors.length > 0 && (
+        <div className="p-3 bg-amber-50 dark:bg-amber-950/25 border border-amber-200 dark:border-amber-900/70 rounded-md text-amber-800 dark:text-amber-200 space-y-1">
+          <div className="flex gap-2">
+            <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-500" />
+            <span>{d.partialSourceFailure}</span>
+          </div>
+          <ul className="pl-5 list-disc font-mono text-[10px] text-amber-700 dark:text-amber-300">
+            {sourceErrors.slice(0, 3).map((error) => <li key={error}>{error}</li>)}
+          </ul>
+        </div>
+      )}
     </div>
   );
 };
@@ -619,9 +684,22 @@ const ScanModal: React.FC<{
                     <span>{d.scanSuccess}</span>
                   </div>
 
-                  <ScanResultHUD result={scanResult} />
+                  <ScanResultHUD result={scanResult} lang={lang} />
+                  <ScanRunNotices result={scanResult} lang={lang} />
 
-                  <div className="flex justify-end pt-2">
+                  <div className="flex justify-end gap-2 pt-2">
+                    {(scanResult.pendingWork || 0) > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onSuccessReload();
+                          handleStartScan();
+                        }}
+                        className="px-3 py-1.5 text-xs font-bold border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-md"
+                      >
+                        {d.continueScan}
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => {
@@ -631,6 +709,67 @@ const ScanModal: React.FC<{
                       className="px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-md"
                     >
                       {d.viewNewCandidates}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {scanResult.status === "queued" && (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 text-blue-700 dark:text-blue-300 font-bold text-xs">
+                    <Activity className="w-4 h-4" />
+                    <span>{d.scanQueued}</span>
+                  </div>
+
+                  <ScanResultHUD result={scanResult} lang={lang} />
+                  <ScanRunNotices result={scanResult} lang={lang} />
+
+                  <div className="flex justify-end gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={onClose}
+                      className="px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-md"
+                    >
+                      {d.cancel}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleStartScan}
+                      className="px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-md"
+                    >
+                      {d.continueScan}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {scanResult.status === "no_candidates" && (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 font-bold text-xs">
+                    <CheckCheck className="w-4 h-4 text-slate-500" />
+                    <span>{d.scanNoCandidates}</span>
+                  </div>
+
+                  <ScanResultHUD result={scanResult} lang={lang} />
+                  <p className="p-3 bg-slate-50 dark:bg-black/30 border border-slate-200 dark:border-slate-800 rounded-md text-[11px] font-sans leading-relaxed text-slate-600 dark:text-slate-400">
+                    {d.noCandidatesDesc}
+                  </p>
+                  <ScanRunNotices result={scanResult} lang={lang} />
+
+                  <div className="flex justify-end gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={onClose}
+                      className="px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-md"
+                    >
+                      {d.cancel}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleStartScan}
+                      className="px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-md"
+                    >
+                      {d.retry}
                     </button>
                   </div>
                 </div>
@@ -730,7 +869,7 @@ const InboxView: React.FC<{
             </h1>
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
               <Activity className="w-3 h-3 animate-pulse" />
-              INGESTION_STABLE
+              {d.pipelineGate}
             </span>
           </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 font-sans">{d.inboxSubtitle}</p>

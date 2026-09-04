@@ -1,11 +1,11 @@
 # CT 采集层优化待办（Deferred）
 
-> 记录于 2026-09-01。当前决策：采集层做到"全日志覆盖 + first-seen 基线 + 注册级标准化 + lag 监控"即 90 分，以下优化项验证过价值但边际收益低或依赖环境，暂缓，留待以后。
+> 记录于 2026-09-01，更新于 2026-09-04。当前决策：采集层做到“可配置日志的直接 HTTP 轮询 + first-seen 基线 + 注册级标准化 + lag 监控”即 90 分，以下优化项验证过价值但边际收益低或依赖环境，暂缓，留待以后。
 
 ## 已完成/进行中
 
-- [x] **A1a tuscolo 库 bug 修复**（`ct-moniteur` `httpx_ratelimit.py` 除零，429 重试时 `elapsed=0` / `rate_limit=0`）。已在本机 venv patch 验证两个日志可读。
-- [ ] **A1b tuscolo patch 固化**：以 vendored/monkeypatch 形式固化进项目（uv 重装会覆盖 site-packages 改动）。
+- [x] **A1 取消未声明的外部监视器依赖**（2026-09-04）：`discover` 直接复用项目内的 `CTLogFetcher` + `CTIngestOrchestrator`。无需本机 patch，也不会因重新安装而丢失采集能力。
+- [x] **A2 有界运行的故障可见性**（2026-09-04）：CT 源失败会保留异常栈；`discover --max-rounds` 会输出失败计数与原因，并以非零状态退出。
 - [x] **A3 lag 监控**：每日志落后量监控，防高吞吐日志永久落后。`src/domainhunter/scheduler/lag_monitor.py` + 测试。
 - [x] **first-seen 基线（增量版）**：`ct_seen_domains` 表（domain/first_seen_at/first_source）+ `mark_seen`/`filter_new`/`is_seen` + CLI `filter-enrich --fresh-only`。重复输入自动跳过，不浪费 RDAP/探测/LLM 成本。验证：12 域名首跑全 fresh，二跑全 seen（0 处理）。
 
@@ -17,8 +17,8 @@
 - 价值：+4 日志覆盖，预期发现量 +5~10%。
 
 ### B2. 日志清单定期自动刷新
-- 问题：当前 `CTMoniteur` 的 `refresh_interval=6.0`（小时）已自动刷新 log list，但需要确认新日志/退役日志被正确处理（`_periodic_refresh` 是否重建 clients）。
-- 行动：验证 `_periodic_refresh` 逻辑，必要时补充测试。
+- 问题：当前内置轮询器只轮询显式配置的 `--log` 目标；它不会自动采用新日志或剔除退役日志。
+- 行动：引入可审计的可信 CT log-list 来源，并测试新增、退役、不可达日志的配置刷新行为。
 - 价值：长期不维护也能跟随 Google log list 变化。
 
 ### B3. 深回扫 90 天（可选，可能被 RDAP 替代）

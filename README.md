@@ -3,7 +3,7 @@
 Find newborn domains the moment they first appear in Certificate
 Transparency logs.
 
-DomainHunter watches the public CT log ecosystem, keeps a first-seen
+DomainHunter watches configured public CT logs, keeps a first-seen
 baseline of every domain it has ever observed, and runs a five-stage
 filter funnel — static name signals, RDAP registration age, DNS
 presence, live HTTP probing, and LLM classification — so a single
@@ -16,18 +16,18 @@ third-party aggregator, no API keys. Any OpenAI-compatible LLM works.
 ## How it works
 
 ```
-CT logs (all public logs, classic + tiled)
+CT logs (one or more configured RFC 6962 logs)
   │  get-sth / get-entries / tiles
   ▼
 first-seen baseline          ct_seen_domains — a domain appears for
-  │                          the first time anywhere → it's new
+  │                          the first time in configured sources → early signal
   ▼
 S1  static signals           domain-name shape score (brand-like vs
   │                          random-string spam), tech-TLD boost,
   │                          bulk-registration fingerprint
   ▼
 S2  RDAP registration age    ≤30d → tier 1 · ≤90d → tier 2 · older → drop
-  │                          (free RDAP, no key; unknown → tier 2)
+  │                          (free RDAP, no key; unknown → drop in strict paths)
   ▼
 S3  DNS presence             does the domain resolve at all?
   ▼
@@ -49,7 +49,7 @@ candidate is in the queue.
 ```bash
 python3 -m venv .venv
 bash dev_install.sh                 # editable install + macOS .pth shim
-.venv/bin/python -m pytest -q       # ~360 tests
+.venv/bin/python -m pytest -q       # full deterministic test suite
 ```
 
 ### One-shot funnel
@@ -80,12 +80,18 @@ domainhunter filter-enrich --database ./domainhunter.db \
 ```bash
 domainhunter discover \
   --database ./domainhunter.db \
-  --collect-seconds 60 --round-seconds 120 \
+  --log cloudflare-nimbus2026=https://ct.cloudflare.com/logs/nimbus2026 \
+  --catchup 300 --page-size 300 --round-seconds 120 \
   --provider openai-compatible --base-url "..." --token "$TOKEN" --model "..."
 ```
 
-Every round: collect from all public CT logs → first-seen filter →
-S1–S5 enrichment → mark seen. Runs forever; stop with Ctrl-C.
+Every round uses the built-in RFC 6962 adapter, a persisted source cursor,
+the strict first-seen/RDAP/DNS/final-root gates, and optional S5 LLM
+enrichment. It has no separate `ct_moniteur` installation step. Repeat
+`--log` to poll more than one source; the default is Cloudflare Nimbus 2026.
+Runs forever until Ctrl-C. With `--max-rounds`, a source failure is returned
+as a non-zero exit and the final JSON includes `failed_rounds` and
+`last_error` rather than pretending that it found zero candidates.
 
 ### 候选收件箱
 
@@ -99,23 +105,26 @@ domainhunter serve --database ./domainhunter.db --host 127.0.0.1 --port 8000
 点击“扫描新网站”会发起一次真实的严格 CT 扫描。界面只显示服务端返回的结果，且明确区分三种状态：
 
 - `completed`：本次扫描产生了可审核候选；
+- `queued`：本次有待核验根域仍在队列中，下一次扫描会继续处理它们；
 - `no_candidates`：扫描完成，但没有候选通过严格规则；
+- 部分来源失败：健康来源仍会继续处理，界面会显示失败来源，而不会把它伪装成零候选；
 - 失败：请求或上游扫描失败，界面会显示可复制的错误摘要，不会伪装成零候选。
 
 旧的 `/discovery` 和 `/ops` 链接会重定向到收件箱。
 
 ## First-seen: the core idea
 
-CT logs are append-only: a domain's *first* appearance anywhere in any
-public log is its "birth" in the certificate ecosystem. Newly
-registered domains typically get their first certificate within hours
-to days of registration, so first-seen time ≈ birth time. Renewals of
-old domains are just "seen again" — filtered out for free by the
-`ct_seen_domains` baseline.
+CT logs are append-only: a domain's first appearance in the configured
+sources for this database is a useful early-presence signal. Newly registered
+domains typically get their first certificate within hours to days of
+registration, but a CT sighting alone is not proof of registration age.
+Renewals and older domains are rejected by the durable `ct_seen_domains`
+baseline when present, then by RDAP registration-age checks.
 
-RDAP registration age then confirms it: a registrable domain that is
-≤30 days old and was never seen before is a genuine newborn, not an
-old domain that bought a fresh certificate.
+RDAP registration age then provides the decisive newness check: a
+registrable domain that is ≤30 days old and was never seen by this collector
+before is a strong newborn candidate, rather than an old domain that bought a
+fresh certificate.
 
 ## LLM providers
 
@@ -162,7 +171,7 @@ unless you pass `--host 0.0.0.0`.
 | `POST` | `/v1/candidates/{id}/versions/{v}/decisions` | Idempotent on `request_id`; requires `X-Actor-ID` header |
 | `POST` | `/v1/candidates/{id}/versions/{v}/outreach` | Dry-run by default; emits redacted contact page |
 | `GET` | `/v1/discovery/overview` | Source-event counts + recent candidates |
-| `POST` | `/v1/run/discovery` | One CT log pass end-to-end |
+| `POST` | `/v1/run/discovery` | Strict CT pass; reports `completed` / `queued` / `no_candidates`, pending work, and partial-source errors |
 | `GET` | `/v1/metrics` | Local funnel snapshot (read-only) |
 | `GET` | `/v1/analytics` | Signal→candidate conversion, latency percentiles |
 | `GET` | `/v1/alerts` | Budget-exhausted and runbook hints |
@@ -185,7 +194,7 @@ src/domainhunter/
   publish/      — AIKnows draft-sync client + audit log
   scheduler/    — discovery daemon, lag monitor, work leases, alerts
   storage/      — append-only SQLite adapter + first-seen baseline
-tests/          — 360+ deterministic unit tests + CT fixtures
+tests/          — deterministic unit tests + CT fixtures
 docs/           — design specs, filter-layer plan, CT poller backlog
 ```
 

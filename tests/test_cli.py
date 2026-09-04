@@ -2,6 +2,8 @@ import json
 from datetime import UTC, datetime
 from typing import Self
 
+import pytest
+
 from domainhunter import cli
 from domainhunter.api import create_app
 from domainhunter.domain.candidates import (
@@ -81,6 +83,8 @@ def test_cli_polls_ct_log_and_reports_due_domain(tmp_path, capsys, monkeypatch) 
     imported = json.loads(capsys.readouterr().out)
     assert imported["certificates_seen"] == 1
     assert imported["events_added"] == 2
+    assert imported["source_errors"] == []
+    assert imported["pending_work"] == 1
     assert captured["domains"] == ("example.com",)
     assert captured["tier1_days"] == 30
     assert captured["tier2_days"] == 90
@@ -95,6 +99,175 @@ def test_cli_polls_ct_log_and_reports_due_domain(tmp_path, capsys, monkeypatch) 
     )
     status = json.loads(capsys.readouterr().out)
     assert "example.com" in status["domains"]
+
+
+def test_cli_discover_uses_the_builtin_strict_ct_path(tmp_path, capsys, monkeypatch) -> None:
+    """``discover`` must not depend on a separately installed CT monitor."""
+    captured: dict[str, object] = {}
+
+    class _FakeFetcher:
+        def __init__(self, **kwargs) -> None:
+            captured["fetcher"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    class _FakePoller:
+        def __init__(self, **kwargs) -> None:
+            captured["poller"] = kwargs
+
+    class _FakeProbeContext:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    class _FakePipeline:
+        def __init__(self, **kwargs) -> None:
+            captured["pipeline"] = kwargs
+
+    class _FakeFilterPipeline:
+        def __init__(self, **kwargs) -> None:
+            captured["filter"] = kwargs
+
+    class _FakeOrchestrator:
+        def __init__(self, **kwargs) -> None:
+            captured["orchestrator"] = kwargs
+
+        async def run_once(self):
+            from domainhunter.ingest.ct_orchestrator import CTIngestRunSummary
+
+            return CTIngestRunSummary(
+                certificates_seen=4,
+                events_added=3,
+                probes_run=1,
+                candidates_created=1,
+                next_cursor='{"nimbus": 12}',
+                roots_observed=3,
+                strict_rejections=2,
+                llm_enriched=1,
+            )
+
+    monkeypatch.setattr(cli, "CTLogFetcher", _FakeFetcher)
+    monkeypatch.setattr(cli, "CTPoller", _FakePoller)
+    monkeypatch.setattr(cli, "HTTPProbe", _FakeProbeContext)
+    monkeypatch.setattr(cli, "DomainHunterPipeline", _FakePipeline)
+    monkeypatch.setattr(cli, "FilterPipeline", _FakeFilterPipeline)
+    monkeypatch.setattr(cli, "CTIngestOrchestrator", _FakeOrchestrator)
+
+    assert (
+        cli.main(
+            [
+                "discover",
+                "--database",
+                str(tmp_path / "domainhunter.db"),
+                "--provider",
+                "mock",
+                "--max-rounds",
+                "1",
+                "--round-seconds",
+                "0",
+                "--log",
+                "nimbus=https://ct.example.test/logs/nimbus",
+                "--catchup",
+                "17",
+                "--page-size",
+                "11",
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "database": str(tmp_path / "domainhunter.db"),
+        "failed_rounds": 0,
+        "last_error": None,
+        "rounds": 1,
+        "source_errors": [],
+        "successful_rounds": 1,
+    }
+    assert captured["fetcher"]["catchup_entries"] == 17
+    assert captured["fetcher"]["max_entries_per_page"] == 11
+    assert captured["fetcher"]["logs"][0].log_id == "nimbus"
+    assert captured["filter"] == {
+        "tier1_days": 30,
+        "tier2_days": 90,
+        "require_dns": True,
+        "drop_unknown_rdap": True,
+    }
+    assert captured["orchestrator"]["require_first_seen"] is True
+    assert captured["orchestrator"]["provider"].__class__.__name__ == "MockLLMProvider"
+
+
+def test_cli_discover_reports_a_bounded_source_failure(tmp_path, capsys, monkeypatch) -> None:
+    class _FakeFetcher:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    class _FakePoller:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    class _FakeProbeContext:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+    class _FakePipeline:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    class _FakeFilterPipeline:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    class _FailingOrchestrator:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def run_once(self):
+            raise RuntimeError("test CT source is offline")
+
+    monkeypatch.setattr(cli, "CTLogFetcher", _FakeFetcher)
+    monkeypatch.setattr(cli, "CTPoller", _FakePoller)
+    monkeypatch.setattr(cli, "HTTPProbe", _FakeProbeContext)
+    monkeypatch.setattr(cli, "DomainHunterPipeline", _FakePipeline)
+    monkeypatch.setattr(cli, "FilterPipeline", _FakeFilterPipeline)
+    monkeypatch.setattr(cli, "CTIngestOrchestrator", _FailingOrchestrator)
+
+    assert (
+        cli.main(
+            [
+                "discover",
+                "--database",
+                str(tmp_path / "domainhunter.db"),
+                "--provider",
+                "mock",
+                "--max-rounds",
+                "1",
+            ]
+        )
+        == 1
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rounds"] == 1
+    assert payload["successful_rounds"] == 0
+    assert payload["failed_rounds"] == 1
+    assert payload["last_error"] == "test CT source is offline"
 
 
 def test_cli_serves_the_review_api_from_an_explicit_database(tmp_path, monkeypatch) -> None:
@@ -129,9 +302,12 @@ def test_cli_serves_the_review_api_from_an_explicit_database(tmp_path, monkeypat
 def test_cli_filter_runs_funnel_and_reports(tmp_path, capsys, monkeypatch) -> None:
     """filter invokes the S1→S2→S3 funnel and prints report + candidates."""
 
+    captured: dict[str, object] = {}
+
     class FakePipeline:
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
+            captured.update(kwargs)
 
         def report(self, domains: list[str]) -> dict[str, object]:
             return {"input": len(domains), "kept": 1, "dropped": len(domains) - 1}
@@ -167,7 +343,7 @@ def test_cli_filter_runs_funnel_and_reports(tmp_path, capsys, monkeypatch) -> No
 
     assert (
         cli.main(
-            ["filter", "--input", str(input_file), "--tier1-days", "30", "--require-dns"]
+            ["filter", "--input", str(input_file), "--tier1-days", "30"]
         )
         == 0
     )
@@ -175,15 +351,19 @@ def test_cli_filter_runs_funnel_and_reports(tmp_path, capsys, monkeypatch) -> No
     assert payload["report"]["input"] == 2
     assert payload["report"]["kept"] == 1
     assert payload["candidates"][0]["final_tier"] == "tier1"
+    assert captured["require_dns"] is True
+    assert captured["drop_unknown_rdap"] is True
 
 
 def test_cli_filter_probe_runs_funnel_and_probes(tmp_path, capsys, monkeypatch) -> None:
     """filter-probe runs the funnel then S4-probes survivors into the DB."""
 
+    captured: dict[str, object] = {}
 
     class FakePipeline:
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
+            captured.update(kwargs)
 
         async def run_with_probe(self, domains, **kwargs):
             from domainhunter.filter.pipeline import FilteredCandidate
@@ -228,6 +408,27 @@ def test_cli_filter_probe_runs_funnel_and_probes(tmp_path, capsys, monkeypatch) 
     payload = json.loads(capsys.readouterr().out)
     assert payload["candidates"][0]["final_tier"] == "tier1"
     assert payload["candidates"][0]["probe"]["outcome"] == "success"
+    assert captured["require_dns"] is True
+    assert captured["drop_unknown_rdap"] is True
+
+
+def test_cli_filter_probe_rejects_relaxed_strict_gates(tmp_path) -> None:
+    """A command that persists candidates cannot disable DNS or RDAP gates."""
+    parser = cli._build_parser()
+
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args(
+            [
+                "filter-probe",
+                "--database",
+                str(tmp_path / "domainhunter.db"),
+                "--input",
+                str(tmp_path / "domains.json"),
+                "--no-require-dns",
+            ]
+        )
+
+    assert error.value.code == 2
 
 
 def test_cli_filter_enrich_runs_full_funnel(tmp_path, capsys, monkeypatch) -> None:
@@ -260,7 +461,10 @@ def test_cli_filter_enrich_runs_full_funnel(tmp_path, capsys, monkeypatch) -> No
                 "reason": self.reason,
             }
 
+    captured: dict[str, object] = {}
+
     async def fake_run_batch(**kwargs) -> tuple:
+        captured.update(kwargs)
         return (FakeOutcome(kwargs["domains"][0]),)
 
     import domainhunter.filter.enrich as enrich_module
@@ -286,6 +490,8 @@ def test_cli_filter_enrich_runs_full_funnel(tmp_path, capsys, monkeypatch) -> No
     payload = json.loads(capsys.readouterr().out)
     assert payload["outcomes"][0]["stage"] == "enriched"
     assert payload["outcomes"][0]["llm_outcome"] == "publishable_ai_saas"
+    assert captured["require_dns"] is True
+    assert captured["drop_unknown_rdap"] is True
 
 
 def test_cli_filter_enrich_fresh_only_skips_seen_domains(tmp_path, capsys, monkeypatch) -> None:

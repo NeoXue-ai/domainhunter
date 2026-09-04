@@ -33,6 +33,66 @@ def test_appends_source_event_once_and_maps_it_to_the_registrable_domain(tmp_pat
     assert store.event_domains(event.idempotency_key) == ("example.co.uk",)
 
 
+def test_ct_source_event_atomically_records_its_first_seen_time(tmp_path) -> None:
+    """A persisted CT event must never outlive its first-seen audit record."""
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    event = SourceEvent("ct_log", "argon:42", "app.new-site.ai", OBSERVED_AT)
+
+    assert store.append_source_event(event, hostname="app.new-site.ai") is True
+    assert store.get_ct_first_seen_at("new-site.ai") == OBSERVED_AT
+
+
+def test_store_rebuilds_ct_discovery_state_for_pre_queue_events(tmp_path) -> None:
+    """Opening an upgraded database recovers CT events written before the work queue."""
+    database = tmp_path / "domainhunter.db"
+    store = SQLiteStore(database)
+    event = SourceEvent("ct_log", "argon:42", "new-site.ai", OBSERVED_AT)
+    assert store.append_source_event(event, hostname="new-site.ai") is True
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM ct_discovery_work")
+        connection.execute("DELETE FROM ct_seen_domains")
+        connection.commit()
+
+    upgraded = SQLiteStore(database)
+    work = upgraded.claim_ct_discovery_work(
+        now=OBSERVED_AT, lease_seconds=60, limit=1
+    )
+
+    assert [item.domain for item in work] == ["new-site.ai"]
+    assert upgraded.get_ct_first_seen_at("new-site.ai") == OBSERVED_AT
+
+
+def test_ct_discovery_work_uses_a_lease_and_can_be_retried(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    event = SourceEvent("ct_log", "argon:42", "new-site.ai", OBSERVED_AT)
+    store.append_source_event(event, hostname="new-site.ai")
+
+    first = store.claim_ct_discovery_work(
+        now=OBSERVED_AT, lease_seconds=60, limit=1
+    )
+
+    assert len(first) == 1
+    assert first[0].domain == "new-site.ai"
+    assert first[0].attempt_number == 1
+    assert store.claim_ct_discovery_work(
+        now=OBSERVED_AT, lease_seconds=60, limit=1
+    ) == ()
+
+    assert store.retry_ct_discovery_work(
+        "new-site.ai",
+        lease_token=first[0].lease_token,
+        scheduled_at=OBSERVED_AT,
+        error="dns_not_ready",
+    ) is True
+
+    second = store.claim_ct_discovery_work(
+        now=OBSERVED_AT, lease_seconds=60, limit=1
+    )
+    assert len(second) == 1
+    assert second[0].attempt_number == 2
+
+
 def test_appends_source_event_with_issuer_and_persists_it(tmp_path) -> None:
     database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)

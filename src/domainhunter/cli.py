@@ -90,8 +90,12 @@ def _poll_ct_log(args: argparse.Namespace) -> int:
             "next_cursor": summary.next_cursor,
             "certificates_seen": summary.certificates_seen,
             "events_added": summary.events_added,
+            "roots_observed": summary.roots_observed,
+            "strict_rejections": summary.strict_rejections,
             "probes_run": summary.probes_run,
             "candidates_created": summary.candidates_created,
+            "source_errors": list(summary.source_errors),
+            "pending_work": summary.pending_work,
         }
     )
     return 0
@@ -229,7 +233,11 @@ def _domainhunter_probe(store: SQLiteStore, observed_at: datetime):
         )
         async with HTTPProbe() as http_probe:
             domainhunter_pipeline = DomainHunterPipeline(store=store, probe=http_probe)
-            run = await domainhunter_pipeline.probe_domain(domain, observed_at=observed_at)
+            run = await domainhunter_pipeline.probe_domain(
+                domain,
+                observed_at=observed_at,
+                require_same_final_root=True,
+            )
         return {
             "domain": run.observation.domain,
             "outcome_code": run.observation.outcome_code.value,
@@ -354,14 +362,15 @@ def _filter_enrich(args: argparse.Namespace) -> int:
 
 
 def _discover(args: argparse.Namespace) -> int:
-    """Run the long-running discovery daemon (CT collect → enrich) on a loop."""
+    """Run direct strict CT polling and optional LLM enrichment on a loop."""
 
     from domainhunter.filter.enrich import build_openai_provider
     from domainhunter.llm.provider import MockLLMProvider
-    from domainhunter.scheduler.discovery import DiscoveryDaemon
+    from domainhunter.scheduler.ct_discovery import CTDiscoveryDaemon
     from domainhunter.storage.sqlite import SQLiteStore
 
     store = SQLiteStore(args.database)
+    logs = tuple(args.logs) if args.logs else (DEFAULT_LOG,)
     if args.provider == "mock":
         provider = MockLLMProvider()
     else:
@@ -376,47 +385,55 @@ def _discover(args: argparse.Namespace) -> int:
             base_url=args.base_url, token=token, model=args.model
         )
 
-    def monitor_factory(callback):
-        from ct_moniteur import CTMoniteur
+    async def run() -> CTDiscoveryDaemon:
+        async with CTLogFetcher(
+            logs=logs,
+            catchup_entries=args.catchup,
+            max_entries_per_page=args.page_size,
+        ) as fetcher:
+            poller = CTPoller(store=store, fetch_page=fetcher)
+            async with HTTPProbe() as probe:
+                pipeline = DomainHunterPipeline(store=store, probe=probe)
+                strict_filter = FilterPipeline(
+                    tier1_days=args.tier1_days,
+                    tier2_days=args.tier2_days,
+                    require_dns=True,
+                    drop_unknown_rdap=True,
+                )
+                orchestrator = CTIngestOrchestrator(
+                    store=store,
+                    poller=poller,
+                    pipeline=pipeline,
+                    filter_pipeline=strict_filter,
+                    require_first_seen=True,
+                    probe_limit=args.max_domains_per_round,
+                    provider=provider,
+                )
+                daemon = CTDiscoveryDaemon(
+                    run_once=orchestrator.run_once,
+                    round_seconds=args.round_seconds,
+                )
+                if hasattr(provider, "aclose"):
+                    async with provider:  # type: ignore[union-attr]
+                        await daemon.run(max_rounds=args.max_rounds)
+                else:
+                    await daemon.run(max_rounds=args.max_rounds)
+                return daemon
 
-        # First yield waits one poll_interval, so keep it well under the
-        # collect window to guarantee at least one batch in that window.
-        poll_interval = max(2.0, min(args.collect_seconds / 2, 10.0))
-        return CTMoniteur(
-            callback=callback,
-            poll_interval=poll_interval,
-            timeout=20,
-            max_retries=2,
-        )
-
-    daemon = DiscoveryDaemon(
-        store=store,
-        provider=provider,
-        monitor_factory=monitor_factory,
-        collect_seconds=args.collect_seconds,
-        round_seconds=args.round_seconds,
-        max_domains_per_round=args.max_domains_per_round,
-        tier1_days=args.tier1_days,
-        tier2_days=args.tier2_days,
-        require_dns=args.require_dns,
-        drop_unknown_rdap=args.drop_unknown_rdap,
-    )
-
-    async def run() -> None:
-        if hasattr(provider, "aclose"):
-            async with provider:  # type: ignore[union-attr]
-                await daemon.run(max_rounds=args.max_rounds)
-        else:
-            await daemon.run(max_rounds=args.max_rounds)
-
-    asyncio.run(run())
+    daemon = asyncio.run(run())
     _print_json(
         {
             "rounds": daemon.round,
+            "successful_rounds": daemon.successful_rounds,
+            "failed_rounds": daemon.failed_rounds,
+            "last_error": daemon.last_error,
+            "source_errors": list(daemon.last_source_errors),
             "database": str(args.database),
         }
     )
-    return 0
+    # Bounded invocations are commonly used by launchd/CI.  Surface an
+    # unavailable source as a real failure rather than a successful empty run.
+    return 1 if args.max_rounds is not None and daemon.failed_rounds else 0
 
 
 def _serve(args: argparse.Namespace) -> int:
@@ -869,8 +886,8 @@ def _build_parser() -> argparse.ArgumentParser:
     filter_cmd.add_argument("--input", required=True, type=Path)
     filter_cmd.add_argument("--tier1-days", type=int, default=30)
     filter_cmd.add_argument("--tier2-days", type=int, default=90)
-    filter_cmd.add_argument("--require-dns", action="store_true")
-    filter_cmd.add_argument("--drop-unknown-rdap", action="store_true")
+    filter_cmd.add_argument("--require-dns", action="store_true", default=True)
+    filter_cmd.add_argument("--drop-unknown-rdap", action="store_true", default=True)
     filter_cmd.set_defaults(handler=_filter_domains)
 
     filter_probe_cmd = subparsers.add_parser(
@@ -881,8 +898,8 @@ def _build_parser() -> argparse.ArgumentParser:
     filter_probe_cmd.add_argument("--input", required=True, type=Path)
     filter_probe_cmd.add_argument("--tier1-days", type=int, default=30)
     filter_probe_cmd.add_argument("--tier2-days", type=int, default=90)
-    filter_probe_cmd.add_argument("--require-dns", action="store_true")
-    filter_probe_cmd.add_argument("--drop-unknown-rdap", action="store_true")
+    filter_probe_cmd.add_argument("--require-dns", action="store_true", default=True)
+    filter_probe_cmd.add_argument("--drop-unknown-rdap", action="store_true", default=True)
     filter_probe_cmd.set_defaults(handler=_filter_probe)
 
     filter_enrich_cmd = subparsers.add_parser(
@@ -902,8 +919,8 @@ def _build_parser() -> argparse.ArgumentParser:
     filter_enrich_cmd.add_argument("--token-env")
     filter_enrich_cmd.add_argument("--tier1-days", type=int, default=30)
     filter_enrich_cmd.add_argument("--tier2-days", type=int, default=90)
-    filter_enrich_cmd.add_argument("--require-dns", action="store_true")
-    filter_enrich_cmd.add_argument("--drop-unknown-rdap", action="store_true")
+    filter_enrich_cmd.add_argument("--require-dns", action="store_true", default=True)
+    filter_enrich_cmd.add_argument("--drop-unknown-rdap", action="store_true", default=True)
     filter_enrich_cmd.add_argument(
         "--fresh-only",
         action="store_true",
@@ -931,13 +948,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     discover = subparsers.add_parser(
         "discover",
-        help="long-running discovery daemon: CT collect → first-seen → S1-S5 enrich",
+        help="long-running strict RFC 6962 polling → first-seen → S1-S5 enrich",
     )
     discover.add_argument("--database", required=True, type=Path)
-    discover.add_argument("--collect-seconds", type=float, default=60.0)
     discover.add_argument("--round-seconds", type=float, default=120.0)
     discover.add_argument("--max-rounds", type=int)
     discover.add_argument("--max-domains-per-round", type=int, default=200)
+    discover.add_argument(
+        "--log",
+        action="append",
+        dest="logs",
+        type=_parse_log_spec,
+        default=None,
+        help=(
+            "log spec of the form log_id=base_url; repeat for multiple logs "
+            f"(default: {DEFAULT_LOG.log_id}={DEFAULT_LOG.base_url})"
+        ),
+    )
+    discover.add_argument("--catchup", type=int, default=1000)
+    discover.add_argument("--page-size", type=int, default=500)
     discover.add_argument(
         "--provider",
         choices=("mock", "openai-compatible"),
@@ -949,8 +978,6 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--token-env")
     discover.add_argument("--tier1-days", type=int, default=30)
     discover.add_argument("--tier2-days", type=int, default=90)
-    discover.add_argument("--require-dns", action="store_true")
-    discover.add_argument("--drop-unknown-rdap", action="store_true")
     discover.set_defaults(handler=_discover)
 
     outreach = subparsers.add_parser(

@@ -140,6 +140,40 @@ def test_run_batch_reports_probe_failure(tmp_path) -> None:
     asyncio.run(run())
 
 
+def test_run_batch_rejects_a_cross_root_redirect(tmp_path) -> None:
+    """The manual S1→S5 command cannot turn an old redirect target into a lead."""
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "new.com":
+            return httpx.Response(302, headers={"location": "https://old.com"})
+        return httpx.Response(200, text=_html_page("old.com"))
+
+    async def resolver(_hostname: str) -> tuple[str, ...]:
+        return ("1.1.1.1",)
+
+    async def run() -> tuple:
+        async with HTTPProbe(
+            resolver=resolver,
+            transport=httpx.MockTransport(handler),
+            respect_robots=False,
+        ) as probe:
+            return await run_batch(
+                store=store,
+                domains=["new.com"],
+                provider=MockLLMProvider(draft=_llm_draft()),
+                pipeline=FakeFilterPipeline(kept={"new.com"}),
+                probe=probe,
+                observed_at=NOW,
+            )
+
+    outcomes = asyncio.run(run())
+
+    assert outcomes[0].stage == "probe_failed"
+    assert outcomes[0].reason == "probe produced no rule draft"
+    assert store.list_review_queue() == ()
+
+
 def test_run_batch_reports_llm_skip(tmp_path) -> None:
     """When the LLM fails the schema gate, stage is llm_skipped."""
     database = tmp_path / "domainhunter.db"

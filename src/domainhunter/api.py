@@ -166,6 +166,7 @@ def create_app(
     app = FastAPI(title="DomainHunter Review API", version="0.1.0")
     app.mount("/assets", StaticFiles(directory=_FRONTEND_DIR / "assets"), name="assets")
     clock = now or (lambda: datetime.now(UTC))
+    discover_log_path = Path(database_path).with_suffix(".log")
 
     @app.get("/healthz")
     def healthz() -> dict[str, bool]:
@@ -237,6 +238,20 @@ def create_app(
             "source_errors": list(summary.source_errors),
             "pending_work": summary.pending_work,
         }
+
+    @app.get("/v1/discovery/log")
+    def discovery_log(tail: int = 200) -> dict[str, object]:
+        """Return the tail of the discover daemon's log file (sibling of the DB)."""
+        tail = max(1, min(tail, 1000))
+        if not discover_log_path.exists():
+            return {"exists": False, "lines": []}
+        with discover_log_path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - 262_144))
+            chunk = handle.read().decode("utf-8", errors="replace")
+        lines = chunk.splitlines()[-tail:]
+        return {"exists": True, "lines": lines}
 
     @app.get("/v1/discovery/overview")
     def discovery_overview() -> dict[str, object]:

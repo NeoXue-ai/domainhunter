@@ -85,16 +85,22 @@ def _discover(args: argparse.Namespace) -> int:
 
     from domainhunter.scheduler.ct_discovery import CTDiscoveryDaemon
 
+    log_path = Path(args.database).with_suffix(".log")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_path, encoding="utf-8"),
+        ],
     )
     _LOGGER.info(
-        "discover starting: database=%s logs=%s round_seconds=%s provider=%s",
+        "discover starting: database=%s logs=%s round_seconds=%s provider=%s log_file=%s",
         args.database,
         [t.log_id for t in (args.logs or (DEFAULT_LOG,))],
         args.round_seconds,
         args.provider,
+        log_path,
     )
     _LOGGER.info(
         "each round polls new CT entries, filters, probes, and queues "

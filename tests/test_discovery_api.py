@@ -223,3 +223,27 @@ def test_web_discovery_reports_queued_work_and_partial_source_failure(
     assert response.json()["status"] == "queued"
     assert response.json()["pending_work"] == 4
     assert response.json()["source_errors"] == ["Nimbus endpoint timed out"]
+
+
+def test_discovery_log_endpoint_returns_daemon_tail(tmp_path) -> None:
+    database = tmp_path / "dh.db"
+    log_file = tmp_path / "dh.log"
+    log_file.write_text(
+        "\n".join(f"line-{i}" for i in range(300)) + "\n", encoding="utf-8"
+    )
+
+    client = TestClient(create_app(database))
+    response = client.get("/v1/discovery/log", params={"tail": 5})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["exists"] is True
+    assert body["lines"] == [f"line-{i}" for i in range(295, 300)]
+
+
+def test_discovery_log_endpoint_when_daemon_never_ran(tmp_path) -> None:
+    client = TestClient(create_app(tmp_path / "fresh.db"))
+    response = client.get("/v1/discovery/log")
+
+    assert response.status_code == 200
+    assert response.json() == {"exists": False, "lines": []}

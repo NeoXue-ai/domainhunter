@@ -40,10 +40,19 @@ a candidate is in the queue. Failed probes are retried automatically
 ## Quickstart
 
 ```bash
+git clone https://github.com/NeoXue-ai/domainhunter.git
+cd domainhunter
 python3 -m venv .venv
-bash dev_install.sh                 # editable install + macOS .pth shim
+.venv/bin/pip install -e .          # Windows: .venv\Scripts\pip install -e .
 .venv/bin/python -m pytest -q       # test suite
 ```
+
+> macOS + Python 3.14 only: `site.py` skips hidden `.pth` files, which breaks
+> editable installs. Run `bash dev_install.sh` instead of plain pip — it does
+> the same install plus the fix. Linux and Windows never need this.
+
+Foreground running is the same everywhere: start the command, it runs until
+`Ctrl-C`. The next section is only for keeping it alive when you are away.
 
 ## Commands
 
@@ -94,7 +103,9 @@ strict CT pass via `POST /v1/run/discovery`.
 
 ## HTTP API
 
-Loopback-only unless `--host 0.0.0.0`.
+Loopback-only unless `--host 0.0.0.0`. The API has **no authentication** —
+if you bind a remote server, keep port 8000 behind a firewall allowlist or
+reach it through an SSH tunnel (`ssh -L 8000:127.0.0.1:8000 server`).
 
 | Method | Path | Notes |
 |---|---|---|
@@ -106,6 +117,79 @@ Loopback-only unless `--host 0.0.0.0`.
 | `POST` | `/v1/run/discovery` | one strict CT pass |
 | `GET` | `/v1/discovery/overview` | domains, cursor, funnel counts |
 | `GET` | `/healthz` | `{"ok": true}` |
+
+## Run it 24/7
+
+A background service is only needed so the daemon survives logouts, crashes,
+and reboots. Cursor persistence is durable: after any restart it resumes from
+where it stopped and never re-scans.
+
+### Linux — systemd
+
+```ini
+# /etc/systemd/system/domainhunter.service
+[Unit]
+After=network-online.target
+
+[Service]
+ExecStart=/opt/domainhunter/.venv/bin/domainhunter discover --database /var/lib/domainhunter/dh.db
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now domainhunter    # start + auto-start on boot
+sudo systemctl stop domainhunter            # the off switch
+journalctl -u domainhunter -f               # logs
+```
+
+### macOS — launchd
+
+Save as `~/Library/LaunchAgents/ai.neoxue.domainhunter.plist` (absolute paths
+required):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>ai.neoxue.domainhunter</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/YOU/domainhunter/.venv/bin/domainhunter</string>
+    <string>discover</string>
+    <string>--database</string>
+    <string>/Users/YOU/domainhunter/dh.db</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/YOU/domainhunter/discover.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/domainhunter/discover.err.log</string>
+</dict></plist>
+```
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.neoxue.domainhunter.plist  # on
+launchctl bootout gui/$(id -u)/ai.neoxue.domainhunter                                 # off
+```
+
+Laptop caveat: closing the lid sleeps the Mac and pauses discovery; disable
+auto-sleep if you need true 24h coverage.
+
+### Windows — Task Scheduler (built-in) or NSSM
+
+```bat
+schtasks /Create /TN DomainHunter /SC ONSTART /RU SYSTEM ^
+  /TR "C:\domainhunter\.venv\Scripts\domainhunter.exe discover --database C:\domainhunter\db\dh.db"
+```
+
+For restart-on-failure, open `taskschd.msc` and set "restart on failure" in
+the task's settings — or install [NSSM](https://nssm.cc) for a real Windows
+service with `nssm install DomainHunter <exe> <args>` and `nssm start/stop`
+as the switch.
 
 ## Project layout
 

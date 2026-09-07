@@ -12,14 +12,12 @@ import uvicorn
 
 from domainhunter.api import create_app
 from domainhunter.crawler.http_probe import HTTPProbe
-from domainhunter.domain.work_queue import WorkStage
 from domainhunter.filter.pipeline import FilterPipeline
 from domainhunter.ingest.ct_log_adapter import DEFAULT_LOG, CTLogFetcher, CTLogTarget
 from domainhunter.ingest.ct_orchestrator import CTIngestOrchestrator
 from domainhunter.ingest.ct_poller import CTCertificate, CTPage, CTPoller
 from domainhunter.llm.provider import MockLLMProvider, OpenAICompatibleProvider
 from domainhunter.pipeline import DomainHunterPipeline, enrich_candidate_with_llm
-from domainhunter.scheduler.daemon import WorkerDaemon
 from domainhunter.storage.sqlite import SQLiteStore
 
 
@@ -490,53 +488,6 @@ def _reopen(args: argparse.Namespace) -> int:
     return 0 if response.status_code < 400 else 1
 
 
-def _daemon(args: argparse.Namespace) -> int:
-    """Run the long-running scheduler daemon against one explicit database."""
-
-    async def run() -> None:
-        async with HTTPProbe() as probe:
-            pipeline = DomainHunterPipeline(store=SQLiteStore(args.database), probe=probe)
-            store = SQLiteStore(args.database)
-            from domainhunter.scheduler.alerts import AlertEngine
-
-            alert_engine = AlertEngine(
-                store=store,
-                daily_budget_per_stage={
-                    WorkStage.L1: args.budget_per_stage_l1,
-                    WorkStage.L2: args.budget_per_stage_l2,
-                    WorkStage.LLM: args.budget_per_stage_llm,
-                },
-            )
-            daemon = WorkerDaemon(
-                store=store,
-                pipeline=pipeline,
-                tick_seconds=args.tick_seconds,
-                lease_seconds=args.lease_seconds,
-                budget_per_tick=args.budget_per_tick,
-                worker_id=args.worker_id,
-                daily_budget_per_stage={
-                    WorkStage.L1: args.budget_per_stage_l1,
-                    WorkStage.L2: args.budget_per_stage_l2,
-                    WorkStage.LLM: args.budget_per_stage_llm,
-                },
-                alert_engine=alert_engine,
-                budget_loader=lambda: store.get_budget_config(),
-                pause_checker=lambda stage: (
-                    store.is_stage_paused(stage),
-                    _latest_pause_reason(store, stage),
-                ),
-            )
-            await daemon.run(max_ticks=args.max_ticks)
-
-    asyncio.run(run())
-    return 0
-
-
-def _latest_pause_reason(store: SQLiteStore, stage: WorkStage) -> str:
-    entry = store.latest_stage_pause(stage)
-    return entry[2] if entry is not None else ""
-
-
 def _enrich_llm(args: argparse.Namespace) -> int:
     """Run one LLM enrichment pass against the latest rule-authored version."""
     store = SQLiteStore(args.database)
@@ -619,207 +570,6 @@ def _enrich_llm(args: argparse.Namespace) -> int:
         }
     )
     return 0
-
-
-def _alerts(args: argparse.Namespace) -> int:
-    """Print persisted alerts (optionally filtered by ``--since``)."""
-    store = SQLiteStore(args.database)
-    since = args.since
-    rows = store.list_alerts(since=since)
-    _print_json(
-        {
-            "count": len(rows),
-            "alerts": [
-                {
-                    "alert_id": row.alert_id,
-                    "kind": row.kind.value,
-                    "severity": row.severity.value,
-                    "title": row.title,
-                    "summary": row.summary,
-                    "opened_at": row.opened_at.isoformat(),
-                    "runbook_id": row.runbook_id,
-                    "related_candidate_id": row.related_candidate_id,
-                    "related_stage": row.related_stage,
-                    "payload": dict(row.payload),
-                }
-                for row in rows
-            ],
-        }
-    )
-    return 0
-
-
-def _analytics(args: argparse.Namespace) -> int:
-    """Print funnel analytics as one human-readable line per metric."""
-    store = SQLiteStore(args.database)
-    analytics = store.compute_funnel_analytics()
-    payload = analytics.as_payload()
-    lines = []
-    for key, value in payload.items():
-        if key == "backlog_by_stage" or key == "backlog_over_1h_by_stage":
-            rendered = (
-                " ".join(f"{stage}={count}" for stage, count in sorted(value.items()))
-                if value
-                else "(empty)"
-            )
-        elif value is None:
-            rendered = "n/a"
-        elif isinstance(value, float):
-            rendered = f"{value:.4f}"
-        else:
-            rendered = str(value)
-        lines.append(f"{key}: {rendered}")
-    print("\n".join(lines))
-    return 0
-
-
-def _runbook(args: argparse.Namespace) -> int:
-    """Print the curated runbook text for ``--id`` (exit 1 if not found)."""
-    from domainhunter.scheduler.runbooks import get_runbook_by_id
-
-    runbook = get_runbook_by_id(args.id)
-    if runbook is None:
-        _print_json({"error": "unknown runbook_id", "runbook_id": args.id})
-        return 1
-    _print_json(
-        {
-            "runbook_id": runbook.runbook_id,
-            "kind": runbook.kind.value,
-            "title": runbook.title,
-            "steps": list(runbook.steps),
-        }
-    )
-    return 0
-
-
-def _budget_show(args: argparse.Namespace) -> int:
-    """Print the persisted per-stage daily_limit table."""
-
-    store = SQLiteStore(args.database)
-    limits = store.get_budget_config()
-    rows: list[dict[str, object]] = []
-    for stage in WorkStage:
-        row = store.get_budget_config_row(stage)
-        rows.append(
-            {
-                "stage": stage.value,
-                "daily_limit": float(limits[stage]),
-                "updated_at": row[2].isoformat() if row is not None else None,
-                "updated_by": row[3] if row is not None else None,
-            }
-        )
-    _print_json({"budgets": rows})
-    return 0
-
-
-def _budget_set(args: argparse.Namespace) -> int:
-    """Upsert one stage's daily_limit; exit 2 on validation failure."""
-
-    try:
-        stage_enum = WorkStage(args.stage)
-    except ValueError:
-        _print_json({"error": "unknown stage", "stage": args.stage})
-        return 2
-    if args.daily_limit is None or args.daily_limit <= 0:
-        _print_json({"error": "daily_limit must be positive"})
-        return 2
-    store = SQLiteStore(args.database)
-    occurred_at = datetime.now(UTC)
-    inserted = store.set_budget_config(
-        stage_enum,
-        daily_limit=args.daily_limit,
-        updated_by=args.actor_id,
-        occurred_at=occurred_at,
-    )
-    _print_json(
-        {
-            "stage": stage_enum.value,
-            "daily_limit": args.daily_limit,
-            "updated_at": occurred_at.isoformat(),
-            "updated_by": args.actor_id,
-            "changed": inserted,
-        }
-    )
-    return 0
-
-
-def _pause_show(args: argparse.Namespace) -> int:
-    """Print the latest pause state per stage."""
-
-    store = SQLiteStore(args.database)
-    rows = store.list_stage_pauses()
-    pauses_by_stage = {
-        stage: (stage.value, False, "", "", datetime.fromtimestamp(0, tz=UTC))
-        for stage in WorkStage
-    }
-    for entry in rows:
-        stage_enum, paused, reason, actor_id, paused_at = entry
-        pauses_by_stage[stage_enum] = (
-            stage_enum.value,
-            paused,
-            reason,
-            actor_id,
-            paused_at,
-        )
-    ordered = [pauses_by_stage[stage] for stage in WorkStage]
-    _print_json(
-        {
-            "pauses": [
-                {
-                    "stage": stage_value,
-                    "paused": paused,
-                    "reason": reason,
-                    "actor_id": actor_id,
-                    "paused_at": paused_at.isoformat(),
-                }
-                for stage_value, paused, reason, actor_id, paused_at in ordered
-            ]
-        }
-    )
-    return 0
-
-
-def _pause_set(args: argparse.Namespace) -> int:
-    """Append one pause/unpause audit row for ``--stage``."""
-
-    try:
-        stage_enum = WorkStage(args.stage)
-    except ValueError:
-        _print_json({"error": "unknown stage", "stage": args.stage})
-        return 2
-    paused_value = _parse_bool(args.paused)
-    if paused_value is None:
-        _print_json({"error": "paused must be 'true' or 'false'"})
-        return 2
-    store = SQLiteStore(args.database)
-    paused_at = datetime.now(UTC)
-    inserted = store.set_stage_pause(
-        stage_enum,
-        paused=paused_value,
-        reason=args.reason,
-        actor_id=args.actor_id,
-        paused_at=paused_at,
-    )
-    _print_json(
-        {
-            "stage": stage_enum.value,
-            "paused": paused_value,
-            "reason": args.reason,
-            "actor_id": args.actor_id,
-            "paused_at": paused_at.isoformat(),
-            "created": inserted,
-        }
-    )
-    return 0
-
-
-def _parse_bool(value: str) -> bool | None:
-    lowered = value.lower()
-    if lowered in {"true", "1", "yes"}:
-        return True
-    if lowered in {"false", "0", "no"}:
-        return False
-    return None
 
 
 def _parse_log_spec(value: str) -> CTLogTarget:
@@ -934,18 +684,6 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", default=8000, type=int)
     serve.set_defaults(handler=_serve)
 
-    daemon = subparsers.add_parser("daemon", help="run the long-running scheduler daemon")
-    daemon.add_argument("--database", required=True, type=Path)
-    daemon.add_argument("--tick-seconds", type=float, default=5.0)
-    daemon.add_argument("--lease-seconds", type=float, default=30.0)
-    daemon.add_argument("--budget-per-tick", type=float, default=10.0)
-    daemon.add_argument("--max-ticks", type=int)
-    daemon.add_argument("--worker-id", default="scheduler-worker")
-    daemon.add_argument("--budget-per-stage-l1", type=float, default=100.0)
-    daemon.add_argument("--budget-per-stage-l2", type=float, default=10.0)
-    daemon.add_argument("--budget-per-stage-llm", type=float, default=5.0)
-    daemon.set_defaults(handler=_daemon)
-
     discover = subparsers.add_parser(
         "discover",
         help="long-running strict RFC 6962 polling → first-seen → S1-S5 enrich",
@@ -1028,62 +766,6 @@ def _build_parser() -> argparse.ArgumentParser:
     enrich_llm.add_argument("--evidence-quote", action="append")
     enrich_llm.add_argument("--model-version")
     enrich_llm.set_defaults(handler=_enrich_llm)
-
-    alerts_cmd = subparsers.add_parser(
-        "alerts", help="list persisted operator alerts from the local store"
-    )
-    alerts_cmd.add_argument("--database", required=True, type=Path)
-    alerts_cmd.add_argument("--since", type=_parse_datetime, default=None)
-    alerts_cmd.set_defaults(handler=_alerts)
-
-    analytics_cmd = subparsers.add_parser(
-        "analytics", help="print funnel conversion / latency / backlog analytics"
-    )
-    analytics_cmd.add_argument("--database", required=True, type=Path)
-    analytics_cmd.set_defaults(handler=_analytics)
-
-    runbook_cmd = subparsers.add_parser(
-        "runbook", help="print the curated runbook text for a known anomaly class"
-    )
-    runbook_cmd.add_argument("--id", required=True)
-    runbook_cmd.set_defaults(handler=_runbook)
-
-    budget_cmd = subparsers.add_parser("budget", help="manage per-stage daily budget limits")
-    budget_subparsers = budget_cmd.add_subparsers(dest="budget_command", required=True)
-
-    budget_show_cmd = budget_subparsers.add_parser(
-        "show", help="print the per-stage daily_limit table"
-    )
-    budget_show_cmd.add_argument("--database", required=True, type=Path)
-    budget_show_cmd.set_defaults(handler=_budget_show)
-
-    budget_set_cmd = budget_subparsers.add_parser(
-        "set", help="upsert one stage's daily_limit"
-    )
-    budget_set_cmd.add_argument("--database", required=True, type=Path)
-    budget_set_cmd.add_argument("--stage", required=True)
-    budget_set_cmd.add_argument("--daily-limit", type=float, required=True)
-    budget_set_cmd.add_argument("--actor-id", required=True)
-    budget_set_cmd.set_defaults(handler=_budget_set)
-
-    pause_cmd = subparsers.add_parser("pause", help="manage per-stage pause/resume state")
-    pause_subparsers = pause_cmd.add_subparsers(dest="pause_command", required=True)
-
-    pause_show_cmd = pause_subparsers.add_parser(
-        "show", help="print the latest pause row per stage"
-    )
-    pause_show_cmd.add_argument("--database", required=True, type=Path)
-    pause_show_cmd.set_defaults(handler=_pause_show)
-
-    pause_set_cmd = pause_subparsers.add_parser(
-        "set", help="append one pause/unpause audit row"
-    )
-    pause_set_cmd.add_argument("--database", required=True, type=Path)
-    pause_set_cmd.add_argument("--stage", required=True)
-    pause_set_cmd.add_argument("--paused", required=True)
-    pause_set_cmd.add_argument("--reason", required=True)
-    pause_set_cmd.add_argument("--actor-id", required=True)
-    pause_set_cmd.set_defaults(handler=_pause_set)
 
     return parser
 

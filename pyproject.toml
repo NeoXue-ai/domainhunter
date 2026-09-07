@@ -6,7 +6,6 @@ dependencies = [
     "httpx>=0.28",
     "fastapi>=0.115",
     "publicsuffix2>=2.20191221",
-    "playwright>=1.50",
     "uvicorn>=0.30",
     "cryptography>=42",
 ]

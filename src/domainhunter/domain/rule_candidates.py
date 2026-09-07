@@ -3,7 +3,6 @@
 import re
 
 from domainhunter.crawler.l1_analysis import L1Analysis
-from domainhunter.crawler.l2_analysis import L2Facts
 from domainhunter.domain.candidates import (
     CandidateOutcome,
     CandidateVersionDraft,
@@ -26,17 +25,7 @@ _PRODUCT_TERMS = (
 )
 
 
-def _l2_evidence(facts: L2Facts, url: str) -> tuple[Evidence, ...]:
-    evidence = [Evidence(EvidenceType.H1, heading, url) for heading in facts.headings]
-    evidence.extend(Evidence(EvidenceType.CTA, cta, url) for cta in facts.ctas)
-    if facts.pricing_evidence:
-        evidence.append(Evidence(EvidenceType.PRICING, facts.pricing_evidence, url))
-    return tuple(evidence)
-
-
-def build_rule_candidate_draft(
-    analysis: L1Analysis, *, l2_facts: L2Facts | None = None
-) -> CandidateVersionDraft | None:
+def build_rule_candidate_draft(analysis: L1Analysis) -> CandidateVersionDraft | None:
     """Suggest a cited candidate only when L1 contains at least one usable fact."""
     if analysis.outcome_code not in {OutcomeCode.SUCCESS, OutcomeCode.CONTENT_INSUFFICIENT}:
         return None
@@ -48,8 +37,6 @@ def build_rule_candidate_draft(
         evidence.append(
             Evidence(EvidenceType.META_DESCRIPTION, analysis.meta_description, analysis.final_url)
         )
-    if l2_facts:
-        evidence.extend(_l2_evidence(l2_facts, analysis.final_url))
     if not evidence:
         return None
 

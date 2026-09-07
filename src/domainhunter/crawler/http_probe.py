@@ -27,10 +27,6 @@ async def _default_resolver(hostname: str) -> tuple[str, ...]:
     return await asyncio.to_thread(resolve_public_addresses, hostname)
 
 
-# Backwards-compatible alias for callers (e.g. l2_renderer) that imported the
-# legacy helper before pinned-transport support landed.
-_resolve_public_addresses = _default_resolver
-
 
 class HostRateLimiter:
     """Per-hostname async token-bucket limiter.

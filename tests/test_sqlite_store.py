@@ -8,7 +8,6 @@ from domainhunter.domain.candidates import (
     EvidenceType,
 )
 from domainhunter.domain.events import SourceEvent
-from domainhunter.domain.exposure import ExposureChannel, ExposureCheck, ExposureStatus
 from domainhunter.domain.observations import Observation, OutcomeCode
 from domainhunter.domain.outreach import OutreachEvent
 from domainhunter.domain.publications import PublicationRecord
@@ -316,28 +315,20 @@ def test_appends_review_decisions_idempotently_and_keeps_action_history(tmp_path
     assert decisions[0].reason_tags == (ReasonTag.INSUFFICIENT_EVIDENCE,)
 
 
-def test_persists_exposure_checks_and_review_priority_snapshots(tmp_path) -> None:
+def test_persists_review_priority_snapshots(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate = store.create_candidate("example.com", created_at=OBSERVED_AT)
-    check = ExposureCheck(
-        channel=ExposureChannel.PRODUCT_HUNT,
-        checked_at=OBSERVED_AT,
-        status=ExposureStatus.NOT_OBSERVED,
-        query="Example AI",
-    )
     priority = calculate_review_priority(
         ReviewPriorityInputs(
             product_evidence=0.8,
             early_presence=0.9,
-            low_exposure=check.low_exposure_score,
+            low_exposure=None,
             data_completeness=0.7,
         )
     )
 
-    store.append_exposure_check(candidate.candidate_id, check)
     store.append_review_priority(candidate.candidate_id, priority, calculated_at=OBSERVED_AT)
 
-    assert store.list_exposure_checks(candidate.candidate_id) == (check,)
     snapshot = store.latest_review_priority(candidate.candidate_id)
     assert snapshot is not None
     assert snapshot.priority == priority

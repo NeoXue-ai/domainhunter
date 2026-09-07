@@ -12,7 +12,6 @@ class RetryDecision:
 
     next_check_at: datetime | None
     terminal_status: str | None
-    wait_for_budget: bool = False
 
 
 _DNS_SCHEDULE = (timedelta(hours=6), timedelta(hours=24), timedelta(hours=72))
@@ -65,8 +64,6 @@ def decide_next_action(
         return RetryDecision(next_check_at=None, terminal_status="access_restricted")
     if outcome_code is OutcomeCode.BLOCKED_SSRF:
         return RetryDecision(next_check_at=None, terminal_status="blocked_network")
-    if outcome_code is OutcomeCode.BUDGET_DEFERRED:
-        return RetryDecision(next_check_at=None, terminal_status=None, wait_for_budget=True)
     if outcome_code is OutcomeCode.SUCCESS:
         return RetryDecision(next_check_at=None, terminal_status=None)
     raise ValueError(f"unsupported outcome code: {outcome_code}")

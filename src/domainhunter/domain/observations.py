@@ -18,7 +18,6 @@ class OutcomeCode(StrEnum):
     RENDER_TIMEOUT = "render_timeout"
     CONTENT_INSUFFICIENT = "content_insufficient"
     BLOCKED_SSRF = "blocked_ssrf"
-    BUDGET_DEFERRED = "budget_deferred"
     SUCCESS = "success"
 
 

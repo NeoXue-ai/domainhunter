@@ -9,7 +9,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from domainhunter.domain.alerts import Alert, AlertKind, AlertSeverity
 from domainhunter.domain.audit import AIKnowsAuditEntry
 from domainhunter.domain.candidates import (
     Candidate,
@@ -22,8 +21,7 @@ from domainhunter.domain.candidates import (
 )
 from domainhunter.domain.claims import ClaimTokenRecord, hash_claim_token
 from domainhunter.domain.events import SourceEvent
-from domainhunter.domain.exposure import ExposureChannel, ExposureCheck, ExposureStatus
-from domainhunter.domain.metrics import FunnelAnalytics, FunnelMetrics, percentile
+from domainhunter.domain.metrics import FunnelMetrics
 from domainhunter.domain.normalization import normalize_hostname
 from domainhunter.domain.observations import Observation, OutcomeCode
 from domainhunter.domain.outreach import OutreachEvent
@@ -33,7 +31,6 @@ from domainhunter.domain.retry_policy import decide_next_action
 from domainhunter.domain.review_priority import ReviewPriority, ReviewPrioritySnapshot
 from domainhunter.domain.review_queue import ReviewQueueItem
 from domainhunter.domain.reviews import ReasonTag, ReviewAction, ReviewDecision
-from domainhunter.domain.work_queue import BudgetReservation, WorkLease, WorkStage
 from domainhunter.domain.verification import CandidateVerification
 from domainhunter.publish.aiknows_client import SyncStatus
 
@@ -64,18 +61,6 @@ class CTDiscoveryWorkLease:
     domain: str
     attempt_number: int
     lease_token: str
-
-
-DEFAULT_DAILY_BUDGET: Mapping[WorkStage, float] = {
-    WorkStage.SIGNAL_INGEST: 100000.0,
-    WorkStage.L1: 100.0,
-    WorkStage.L2: 10.0,
-    WorkStage.L3: 5.0,
-    WorkStage.LLM: 20.0,
-    WorkStage.PUBLICATION: 50.0,
-    WorkStage.EXPOSURE: 20.0,
-    WorkStage.CLAIM: 100.0,
-}
 
 
 _SCHEMA = """
@@ -200,17 +185,6 @@ CREATE TABLE IF NOT EXISTS review_decisions (
         REFERENCES candidate_versions(candidate_id, version)
 );
 
-CREATE TABLE IF NOT EXISTS exposure_checks (
-    id INTEGER PRIMARY KEY,
-    candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
-    channel TEXT NOT NULL,
-    checked_at TEXT NOT NULL,
-    status TEXT NOT NULL,
-    query TEXT NOT NULL,
-    evidence_url TEXT,
-    detail TEXT
-);
-
 CREATE TABLE IF NOT EXISTS review_priorities (
     id INTEGER PRIMARY KEY,
     candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id),
@@ -236,28 +210,6 @@ CREATE TABLE IF NOT EXISTS publications (
     detail TEXT,
     FOREIGN KEY (candidate_id, candidate_version)
         REFERENCES candidate_versions(candidate_id, version)
-);
-
-CREATE TABLE IF NOT EXISTS work_queue (
-    id INTEGER PRIMARY KEY,
-    stage TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    scheduled_at TEXT NOT NULL,
-    lease_token TEXT,
-    lease_owner TEXT,
-    lease_expires_at TEXT,
-    completed_at TEXT,
-    UNIQUE(stage, entity_id)
-);
-
-CREATE TABLE IF NOT EXISTS budget_ledger (
-    id INTEGER PRIMARY KEY,
-    stage TEXT NOT NULL,
-    entity_id TEXT,
-    occurred_at TEXT NOT NULL,
-    units REAL NOT NULL,
-    status TEXT NOT NULL,
-    reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS claim_tokens (
@@ -307,40 +259,6 @@ CREATE TABLE IF NOT EXISTS reopen_events (
     FOREIGN KEY (candidate_id) REFERENCES candidates(candidate_id)
 );
 
-CREATE TABLE IF NOT EXISTS alerts (
-    alert_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    severity TEXT NOT NULL,
-    title TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    opened_at TEXT NOT NULL,
-    runbook_id TEXT NOT NULL,
-    related_candidate_id TEXT,
-    related_stage TEXT,
-    payload_json TEXT NOT NULL DEFAULT '{}'
-);
-
-CREATE INDEX IF NOT EXISTS idx_alerts_fingerprint
-    ON alerts (kind, related_candidate_id, related_stage, opened_at);
-
-CREATE TABLE IF NOT EXISTS budget_config (
-    stage TEXT PRIMARY KEY,
-    daily_limit REAL NOT NULL,
-    updated_at TEXT NOT NULL,
-    updated_by TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS stage_pauses (
-    id INTEGER PRIMARY KEY,
-    stage TEXT NOT NULL,
-    paused INTEGER NOT NULL,
-    reason TEXT NOT NULL,
-    actor_id TEXT NOT NULL,
-    paused_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_stage_pauses_stage_at
-    ON stage_pauses (stage, paused_at);
 """
 
 
@@ -1243,51 +1161,6 @@ class SQLiteStore:
             ).fetchone()
         return row is not None and row["revoked_at"] is not None
 
-    def append_exposure_check(self, candidate_id: str, check: ExposureCheck) -> int:
-        """Append one explicit public-channel result for a known candidate."""
-        with self._connection() as connection:
-            if not self._candidate_exists(connection, candidate_id):
-                raise ValueError(f"cannot observe unknown candidate: {candidate_id}")
-            cursor = connection.execute(
-                """
-                INSERT INTO exposure_checks (
-                    candidate_id, channel, checked_at, status, query, evidence_url, detail
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    candidate_id,
-                    check.channel.value,
-                    check.checked_at.isoformat(),
-                    check.status.value,
-                    check.query,
-                    check.evidence_url,
-                    check.detail,
-                ),
-            )
-        return cursor.lastrowid
-
-    def list_exposure_checks(self, candidate_id: str) -> tuple[ExposureCheck, ...]:
-        """Reload all exposure evidence in append order."""
-        with self._connection() as connection:
-            rows = connection.execute(
-                """
-                SELECT channel, checked_at, status, query, evidence_url, detail
-                FROM exposure_checks WHERE candidate_id = ? ORDER BY id
-                """,
-                (candidate_id,),
-            ).fetchall()
-        return tuple(
-            ExposureCheck(
-                channel=ExposureChannel(row["channel"]),
-                checked_at=datetime.fromisoformat(row["checked_at"]),
-                status=ExposureStatus(row["status"]),
-                query=row["query"],
-                evidence_url=row["evidence_url"],
-                detail=row["detail"],
-            )
-            for row in rows
-        )
-
     def append_review_priority(
         self,
         candidate_id: str,
@@ -1456,191 +1329,6 @@ class SQLiteStore:
             for row in rows
         )
 
-    def enqueue_work(self, stage: WorkStage, entity_id: str, *, scheduled_at: datetime) -> bool:
-        """Add one idempotent work item; duplicate active work is not multiplied."""
-        if not entity_id.strip():
-            raise ValueError("entity_id must not be empty")
-        if scheduled_at.tzinfo is None:
-            raise ValueError("scheduled_at must be timezone-aware")
-        with self._connection() as connection:
-            cursor = connection.execute(
-                """
-                INSERT OR IGNORE INTO work_queue (stage, entity_id, scheduled_at)
-                VALUES (?, ?, ?)
-                """,
-                (stage.value, entity_id, scheduled_at.isoformat()),
-            )
-        return cursor.rowcount == 1
-
-    def claim_work(
-        self,
-        *,
-        worker_id: str,
-        now: datetime,
-        lease_seconds: float,
-        limit: int,
-    ) -> tuple[WorkLease, ...]:
-        """Atomically lease due work; expired leases are safely reclaimable."""
-        if not worker_id.strip():
-            raise ValueError("worker_id must not be empty")
-        if now.tzinfo is None:
-            raise ValueError("now must be timezone-aware")
-        if lease_seconds <= 0 or limit < 1:
-            raise ValueError("lease_seconds and limit must be positive")
-        from datetime import timedelta
-
-        expires_at = now + timedelta(seconds=lease_seconds)
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                """
-                SELECT id, stage, entity_id, scheduled_at FROM work_queue
-                WHERE completed_at IS NULL AND scheduled_at <= ?
-                  AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
-                ORDER BY scheduled_at, id LIMIT ?
-                """,
-                (now.isoformat(), now.isoformat(), limit),
-            ).fetchall()
-            leases: list[WorkLease] = []
-            for row in rows:
-                token = uuid4().hex
-                connection.execute(
-                    """
-                    UPDATE work_queue
-                    SET lease_token = ?, lease_owner = ?, lease_expires_at = ?
-                    WHERE id = ?
-                    """,
-                    (token, worker_id, expires_at.isoformat(), row["id"]),
-                )
-                leases.append(
-                    WorkLease(
-                        work_id=row["id"],
-                        stage=WorkStage(row["stage"]),
-                        entity_id=row["entity_id"],
-                        scheduled_at=datetime.fromisoformat(row["scheduled_at"]),
-                        lease_token=token,
-                        lease_owner=worker_id,
-                        lease_expires_at=expires_at,
-                    )
-                )
-        return tuple(leases)
-
-    def release_work(
-        self,
-        work_id: int,
-        *,
-        lease_token: str,
-        reschedule_at: datetime,
-    ) -> bool:
-        """Return one leased work item to the queue so it can be retried later."""
-        if reschedule_at.tzinfo is None:
-            raise ValueError("reschedule_at must be timezone-aware")
-        with self._connection() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE work_queue
-                SET lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL,
-                    scheduled_at = ?
-                WHERE id = ? AND lease_token = ? AND completed_at IS NULL
-                """,
-                (reschedule_at.isoformat(), work_id, lease_token),
-            )
-        return cursor.rowcount == 1
-
-    def complete_work(self, work_id: int, *, lease_token: str) -> bool:
-        """Mark one leased work item as completed exactly once."""
-        with self._connection() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE work_queue
-                SET lease_token = NULL, lease_owner = NULL, lease_expires_at = NULL,
-                    completed_at = ?
-                WHERE id = ? AND lease_token = ? AND completed_at IS NULL
-                """,
-                (datetime.now(UTC).isoformat(), work_id, lease_token),
-            )
-        return cursor.rowcount == 1
-
-    def record_budget_deferred(
-        self,
-        stage: WorkStage,
-        *,
-        entity_id: str | None,
-        units: float,
-        occurred_at: datetime,
-        reason: str,
-    ) -> None:
-        """Append an explicit budget-deferred entry for an unimplemented stage."""
-        if units <= 0:
-            raise ValueError("units must be positive")
-        if occurred_at.tzinfo is None:
-            raise ValueError("occurred_at must be timezone-aware")
-        with self._connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO budget_ledger (stage, entity_id, occurred_at, units, status, reason)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    stage.value,
-                    entity_id,
-                    occurred_at.isoformat(),
-                    units,
-                    "deferred",
-                    reason,
-                ),
-            )
-
-    def reserve_budget(
-        self,
-        stage: WorkStage,
-        *,
-        units: float,
-        daily_limit: float,
-        occurred_at: datetime,
-        entity_id: str | None = None,
-    ) -> BudgetReservation:
-        """Append a daily cost decision without silently discarding deferred work."""
-        if units <= 0 or daily_limit < 0:
-            raise ValueError("units must be positive and daily_limit must be non-negative")
-        if occurred_at.tzinfo is None:
-            raise ValueError("occurred_at must be timezone-aware")
-        from datetime import UTC, timedelta
-
-        utc_time = occurred_at.astimezone(UTC)
-        day_start = utc_time.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_end = day_start + timedelta(days=1)
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            used = connection.execute(
-                """
-                SELECT COALESCE(SUM(units), 0) AS used FROM budget_ledger
-                WHERE stage = ? AND status = 'reserved'
-                  AND occurred_at >= ? AND occurred_at < ?
-                """,
-                (stage.value, day_start.isoformat(), day_end.isoformat()),
-            ).fetchone()["used"]
-            allowed = used + units <= daily_limit
-            connection.execute(
-                """
-                INSERT INTO budget_ledger (stage, entity_id, occurred_at, units, status, reason)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    stage.value,
-                    entity_id,
-                    utc_time.isoformat(),
-                    units,
-                    "reserved" if allowed else "deferred",
-                    None if allowed else "budget_deferred",
-                ),
-            )
-        return BudgetReservation(
-            allowed=allowed,
-            remaining_units=max(0.0, float(daily_limit - (used + units if allowed else used))),
-            reason=None if allowed else "budget_deferred",
-        )
-
     def append_claim_token(self, record: ClaimTokenRecord) -> bool:
         """Persist only the one-way token hash for a known candidate."""
         with self._connection() as connection:
@@ -1773,7 +1461,7 @@ class SQLiteStore:
         )
 
     def funnel_metrics(self) -> FunnelMetrics:
-        """Return an explicit local snapshot of throughput, failure reasons, and budget pressure."""
+        """Return a compact count snapshot of the discovery funnel."""
         with self._connection() as connection:
             def count(table: str) -> int:
                 return connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"]
@@ -1787,24 +1475,11 @@ class SQLiteStore:
                     "candidates",
                     "candidate_versions",
                     "review_decisions",
-                    "publications",
-                    "outreach_events",
-                    "work_queue",
                 )
             }
             outcome_rows = connection.execute(
                 "SELECT outcome_code, COUNT(*) AS count FROM observations GROUP BY outcome_code"
             ).fetchall()
-            budget_rows = connection.execute(
-                """
-                SELECT status, COALESCE(SUM(units), 0) AS units
-                FROM budget_ledger GROUP BY status
-                """
-            ).fetchall()
-        budgets = {row["status"]: float(row["units"]) for row in budget_rows}
-        reserved_units = budgets.get("reserved", 0.0)
-        approved_version_count = self.count_approved_versions()
-        cost_per_effective_candidate = reserved_units / max(1, approved_version_count)
         return FunnelMetrics(
             source_events=counts["source_events"],
             domains=counts["domains"],
@@ -1812,136 +1487,7 @@ class SQLiteStore:
             candidates=counts["candidates"],
             candidate_versions=counts["candidate_versions"],
             review_decisions=counts["review_decisions"],
-            publications=counts["publications"],
-            outreach_events=counts["outreach_events"],
-            queued_work=counts["work_queue"],
-            budget_reserved_units=reserved_units,
-            budget_deferred_units=budgets.get("deferred", 0.0),
-            cost_per_effective_candidate=cost_per_effective_candidate,
             observation_outcomes={row["outcome_code"]: row["count"] for row in outcome_rows},
-        )
-
-    def compute_funnel_analytics(self, *, now: datetime | None = None) -> FunnelAnalytics:
-        """Return conversion rates, latency percentiles, and backlog shape.
-
-        Latency samples are pulled per-row rather than aggregated in SQL so we
-        can keep using ISO-8601 strings and avoid ``MIN(...)`` across the
-        joined set, which would return a string SQLite may not order the way
-        Python expects across the full UTC offset range.
-        """
-        computed_at = now if now is not None else datetime.now(UTC)
-        if computed_at.tzinfo is None:
-            raise ValueError("now must be timezone-aware")
-        with self._connection() as connection:
-            source_event_count = int(
-                connection.execute("SELECT COUNT(*) AS count FROM source_events").fetchone()["count"]
-            )
-            candidate_count = int(
-                connection.execute("SELECT COUNT(*) AS count FROM candidates").fetchone()["count"]
-            )
-            candidate_version_count = int(
-                connection.execute("SELECT COUNT(*) AS count FROM candidate_versions").fetchone()["count"]
-            )
-            publication_count = int(
-                connection.execute("SELECT COUNT(*) AS count FROM publications").fetchone()["count"]
-            )
-            approved_version_count = int(
-                connection.execute(
-                    """
-                    SELECT COUNT(*) AS approved FROM (
-                        SELECT candidate_id, candidate_version, action,
-                               ROW_NUMBER() OVER (
-                                   PARTITION BY candidate_id, candidate_version
-                                   ORDER BY rowid DESC
-                               ) AS rn
-                        FROM review_decisions
-                        WHERE revoked_at IS NULL
-                    ) latest
-                    WHERE latest.rn = 1 AND latest.action = ?
-                    """,
-                    (ReviewAction.APPROVE.value,),
-                ).fetchone()["approved"]
-            )
-
-            first_signal_rows = connection.execute(
-                """
-                SELECT c.candidate_id, c.created_at, MIN(se.observed_at) AS first_signal
-                FROM candidates c
-                JOIN event_domains ed ON ed.domain = c.domain
-                JOIN source_events se ON se.id = ed.event_id
-                GROUP BY c.candidate_id, c.created_at
-                """
-            ).fetchall()
-            first_signal_latencies: list[float] = []
-            for row in first_signal_rows:
-                created_at = datetime.fromisoformat(row["created_at"])
-                first_signal = datetime.fromisoformat(row["first_signal"])
-                first_signal_latencies.append(
-                    (created_at - first_signal).total_seconds()
-                )
-
-            decision_latency_rows = connection.execute(
-                """
-                SELECT rd.decided_at, cv.created_at AS version_created_at
-                FROM review_decisions rd
-                JOIN candidate_versions cv
-                  ON cv.candidate_id = rd.candidate_id
-                 AND cv.version = rd.candidate_version
-                """
-            ).fetchall()
-            decision_latencies: list[float] = []
-            for row in decision_latency_rows:
-                decided_at = datetime.fromisoformat(row["decided_at"])
-                version_created_at = datetime.fromisoformat(row["version_created_at"])
-                decision_latencies.append(
-                    (decided_at - version_created_at).total_seconds()
-                )
-
-            backlog_rows = connection.execute(
-                """
-                SELECT stage, COUNT(*) AS count FROM work_queue
-                WHERE completed_at IS NULL
-                GROUP BY stage
-                """
-            ).fetchall()
-            backlog_over_1h_rows = connection.execute(
-                """
-                SELECT stage, COUNT(*) AS count FROM work_queue
-                WHERE completed_at IS NULL
-                  AND scheduled_at < ?
-                GROUP BY stage
-                """,
-                ((computed_at - timedelta(hours=1)).isoformat(),),
-            ).fetchall()
-
-        def clamp01(value: float) -> float:
-            return min(max(value, 0.0), 1.0)
-
-        conversion_source_to_candidate = clamp01(
-            candidate_count / max(1, source_event_count)
-        )
-        conversion_candidate_to_approved = clamp01(
-            approved_version_count / max(1, candidate_version_count)
-        )
-        conversion_source_to_published = clamp01(
-            publication_count / max(1, source_event_count)
-        )
-
-        return FunnelAnalytics(
-            conversion_source_to_candidate=conversion_source_to_candidate,
-            conversion_candidate_to_approved=conversion_candidate_to_approved,
-            conversion_source_to_published=conversion_source_to_published,
-            latency_first_signal_to_candidate_p50_seconds=percentile(first_signal_latencies, 50.0),
-            latency_first_signal_to_candidate_p95_seconds=percentile(first_signal_latencies, 95.0),
-            latency_candidate_to_decision_p50_seconds=percentile(decision_latencies, 50.0),
-            latency_candidate_to_decision_p95_seconds=percentile(decision_latencies, 95.0),
-            backlog_by_stage={
-                row["stage"]: int(row["count"]) for row in backlog_rows
-            },
-            backlog_over_1h_by_stage={
-                row["stage"]: int(row["count"]) for row in backlog_over_1h_rows
-            },
-            computed_at=computed_at,
         )
 
     @staticmethod
@@ -2108,306 +1654,3 @@ class SQLiteStore:
     # ------------------------------------------------------------------
     # Alert persistence (spec §14)
     # ------------------------------------------------------------------
-
-    def append_alert(
-        self,
-        alert: Alert,
-        *,
-        dedup_window: timedelta | None = None,
-        now: datetime | None = None,
-    ) -> bool:
-        """Idempotently persist one operator-actionable anomaly.
-
-        Returns ``True`` when a new row was inserted; ``False`` when the same
-        fingerprint was already on record inside ``dedup_window`` (6h default).
-        """
-
-        if alert.opened_at.tzinfo is None:
-            raise ValueError("opened_at must be timezone-aware")
-        window = dedup_window or timedelta(hours=6)
-        anchor = now or alert.opened_at
-        window_start = anchor - window
-        with self._connection() as connection:
-            duplicate = connection.execute(
-                """
-                SELECT 1 FROM alerts
-                WHERE kind = ? AND related_candidate_id IS ? AND related_stage IS ?
-                  AND opened_at >= ?
-                LIMIT 1
-                """,
-                (
-                    alert.kind.value,
-                    alert.related_candidate_id,
-                    alert.related_stage,
-                    window_start.isoformat(),
-                ),
-            ).fetchone()
-            if duplicate is not None:
-                return False
-            connection.execute(
-                """
-                INSERT INTO alerts (
-                    alert_id, kind, severity, title, summary, opened_at,
-                    runbook_id, related_candidate_id, related_stage, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    alert.alert_id,
-                    alert.kind.value,
-                    alert.severity.value,
-                    alert.title,
-                    alert.summary,
-                    alert.opened_at.isoformat(),
-                    alert.runbook_id,
-                    alert.related_candidate_id,
-                    alert.related_stage,
-                    json.dumps(dict(alert.payload), ensure_ascii=False, sort_keys=True),
-                ),
-            )
-        return True
-
-    def list_alerts(self, since: datetime | None = None) -> tuple[Alert, ...]:
-        """Return persisted alerts in append order, optionally filtered by ``since``."""
-
-        with self._connection() as connection:
-            if since is None:
-                rows = connection.execute(
-                    """
-                    SELECT alert_id, kind, severity, title, summary, opened_at,
-                           runbook_id, related_candidate_id, related_stage,
-                           payload_json
-                    FROM alerts ORDER BY opened_at, alert_id
-                    """
-                ).fetchall()
-            else:
-                if since.tzinfo is None:
-                    raise ValueError("since must be timezone-aware")
-                rows = connection.execute(
-                    """
-                    SELECT alert_id, kind, severity, title, summary, opened_at,
-                           runbook_id, related_candidate_id, related_stage,
-                           payload_json
-                    FROM alerts WHERE opened_at >= ? ORDER BY opened_at, alert_id
-                    """,
-                    (since.isoformat(),),
-                ).fetchall()
-        return tuple(
-            Alert(
-                alert_id=row["alert_id"],
-                kind=AlertKind(row["kind"]),
-                severity=AlertSeverity(row["severity"]),
-                title=row["title"],
-                summary=row["summary"],
-                opened_at=datetime.fromisoformat(row["opened_at"]),
-                runbook_id=row["runbook_id"],
-                related_candidate_id=row["related_candidate_id"],
-                related_stage=row["related_stage"],
-                payload=dict(json.loads(row["payload_json"])),
-            )
-            for row in rows
-        )
-
-    # ------------------------------------------------------------------
-    # Operations runtime config (spec §14 budget + pause controls)
-    # ------------------------------------------------------------------
-
-    def get_budget_config(self) -> dict[WorkStage, float]:
-        """Return persisted daily_limit per stage; missing rows fall back to defaults.
-
-        No rows are auto-inserted; if a stage has no row, the hardcoded
-        :data:`DEFAULT_DAILY_BUDGET` value is returned. ``set_budget_config``
-        is the only writer that materializes a row.
-        """
-
-        with self._connection() as connection:
-            rows = connection.execute(
-                "SELECT stage, daily_limit FROM budget_config"
-            ).fetchall()
-        persisted: dict[WorkStage, float] = {
-            WorkStage(row["stage"]): float(row["daily_limit"]) for row in rows
-        }
-        result: dict[WorkStage, float] = {stage: DEFAULT_DAILY_BUDGET[stage] for stage in WorkStage}
-        result.update(persisted)
-        return result
-
-    def set_budget_config(
-        self,
-        stage: WorkStage,
-        *,
-        daily_limit: float,
-        updated_by: str,
-        occurred_at: datetime,
-    ) -> bool:
-        """Upsert one stage's daily_limit; idempotent on identical (stage, updated_at)."""
-
-        if daily_limit <= 0:
-            raise ValueError("daily_limit must be positive")
-        if not updated_by or not updated_by.strip():
-            raise ValueError("updated_by must not be empty")
-        if occurred_at.tzinfo is None:
-            raise ValueError("occurred_at must be timezone-aware")
-        timestamp = occurred_at.isoformat()
-        with self._connection() as connection:
-            existing = connection.execute(
-                "SELECT daily_limit, updated_at FROM budget_config WHERE stage = ?",
-                (stage.value,),
-            ).fetchone()
-            if existing is not None and (
-                float(existing["daily_limit"]) == float(daily_limit)
-                and existing["updated_at"] == timestamp
-            ):
-                return False
-            connection.execute(
-                """
-                INSERT INTO budget_config (stage, daily_limit, updated_at, updated_by)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(stage) DO UPDATE SET
-                    daily_limit = excluded.daily_limit,
-                    updated_at = excluded.updated_at,
-                    updated_by = excluded.updated_by
-                """,
-                (stage.value, float(daily_limit), timestamp, updated_by),
-            )
-        return True
-
-    def get_budget_config_row(self, stage: WorkStage) -> tuple[str, float, datetime, str] | None:
-        """Return the persisted row for a single stage, if any."""
-
-        with self._connection() as connection:
-            row = connection.execute(
-                "SELECT stage, daily_limit, updated_at, updated_by FROM budget_config WHERE stage = ?",
-                (stage.value,),
-            ).fetchone()
-        if row is None:
-            return None
-        return (
-            row["stage"],
-            float(row["daily_limit"]),
-            datetime.fromisoformat(row["updated_at"]),
-            row["updated_by"],
-        )
-
-    def set_stage_pause(
-        self,
-        stage: WorkStage,
-        *,
-        paused: bool,
-        reason: str,
-        actor_id: str,
-        paused_at: datetime,
-    ) -> bool:
-        """Append one pause/unpause audit row; idempotent on identical repeated writes.
-
-        Idempotent on ``(stage, paused, reason)`` within a 1-minute window of
-        ``paused_at``: if a matching row already exists in that window, the
-        call returns ``False`` without inserting. Otherwise a new row is
-        appended and ``True`` is returned. The latest row per stage wins for
-        ``is_stage_paused`` / ``list_stage_pauses``.
-        """
-
-        if not reason or not reason.strip():
-            raise ValueError("reason must not be empty")
-        if not actor_id or not actor_id.strip():
-            raise ValueError("actor_id must not be empty")
-        if paused_at.tzinfo is None:
-            raise ValueError("paused_at must be timezone-aware")
-        timestamp = paused_at.isoformat()
-        window_start = (paused_at - timedelta(minutes=1)).isoformat()
-        with self._connection() as connection:
-            duplicate = connection.execute(
-                """
-                SELECT 1 FROM stage_pauses
-                WHERE stage = ? AND paused = ? AND reason = ?
-                  AND paused_at >= ? AND paused_at <= ?
-                LIMIT 1
-                """,
-                (
-                    stage.value,
-                    1 if paused else 0,
-                    reason,
-                    window_start,
-                    timestamp,
-                ),
-            ).fetchone()
-            if duplicate is not None:
-                return False
-            connection.execute(
-                """
-                INSERT INTO stage_pauses (stage, paused, reason, actor_id, paused_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (stage.value, 1 if paused else 0, reason, actor_id, timestamp),
-            )
-        return True
-
-    def is_stage_paused(
-        self, stage: WorkStage, *, now: datetime | None = None
-    ) -> bool:
-        """Return whether the most recent pause row for ``stage`` is paused."""
-
-        del now  # accepted for future TTL semantics; the table is an audit log
-        with self._connection() as connection:
-            row = connection.execute(
-                """
-                SELECT paused FROM stage_pauses
-                WHERE stage = ?
-                ORDER BY paused_at DESC, id DESC LIMIT 1
-                """,
-                (stage.value,),
-            ).fetchone()
-        if row is None:
-            return False
-        return bool(row["paused"])
-
-    def list_stage_pauses(
-        self,
-    ) -> tuple[tuple[WorkStage, bool, str, str, datetime], ...]:
-        """Return the latest pause row per stage in deterministic stage order."""
-
-        with self._connection() as connection:
-            rows = connection.execute(
-                """
-                SELECT stage, paused, reason, actor_id, paused_at FROM (
-                    SELECT stage, paused, reason, actor_id, paused_at,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY stage ORDER BY paused_at DESC, id DESC
-                           ) AS rn
-                    FROM stage_pauses
-                ) latest WHERE rn = 1 ORDER BY stage
-                """
-            ).fetchall()
-        return tuple(
-            (
-                WorkStage(row["stage"]),
-                bool(row["paused"]),
-                row["reason"],
-                row["actor_id"],
-                datetime.fromisoformat(row["paused_at"]),
-            )
-            for row in rows
-        )
-
-    def latest_stage_pause(
-        self, stage: WorkStage
-    ) -> tuple[WorkStage, bool, str, str, datetime] | None:
-        """Return the latest pause row for one stage, if any."""
-
-        with self._connection() as connection:
-            row = connection.execute(
-                """
-                SELECT stage, paused, reason, actor_id, paused_at
-                FROM stage_pauses
-                WHERE stage = ?
-                ORDER BY paused_at DESC, id DESC LIMIT 1
-                """,
-                (stage.value,),
-            ).fetchone()
-        if row is None:
-            return None
-        return (
-            WorkStage(row["stage"]),
-            bool(row["paused"]),
-            row["reason"],
-            row["actor_id"],
-            datetime.fromisoformat(row["paused_at"]),
-        )

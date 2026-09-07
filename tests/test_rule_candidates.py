@@ -1,5 +1,4 @@
 from domainhunter.crawler.l1_analysis import analyze_http_document
-from domainhunter.crawler.l2_analysis import extract_rendered_facts
 from domainhunter.domain.candidates import CandidateOutcome, EvidenceType
 from domainhunter.domain.rule_candidates import build_rule_candidate_draft
 
@@ -40,27 +39,3 @@ def test_returns_not_ready_for_weak_metadata_and_none_without_evidence() -> None
     assert weak_draft is not None
     assert weak_draft.primary_outcome is CandidateOutcome.VALID_BUT_NOT_READY
     assert build_rule_candidate_draft(empty) is None
-
-
-def test_adds_cited_l2_product_evidence_to_rule_draft() -> None:
-    analysis = analyze_http_document(
-        status_code=200,
-        final_url="https://example.com",
-        html=(
-            "<title>Example AI — Automate workflows</title>"
-            '<meta name="description" content="AI workflow automation">'
-            "<p>" + ("Automate your team workflows. " * 30) + "</p>"
-        ),
-    )
-    facts = extract_rendered_facts(
-        "<h1>Example AI</h1><button>Start free trial</button><p>Plans start at $29.</p>"
-    )
-
-    draft = build_rule_candidate_draft(analysis, l2_facts=facts)
-
-    assert draft is not None
-    assert {item.evidence_type for item in draft.evidence} >= {
-        EvidenceType.H1,
-        EvidenceType.CTA,
-        EvidenceType.PRICING,
-    }

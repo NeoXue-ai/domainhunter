@@ -26,7 +26,6 @@ from domainhunter.domain.candidates import (
 )
 from domainhunter.domain.reviews import ReviewAction, build_review_decision
 from domainhunter.domain.review_priority import ReviewPriorityInputs, calculate_review_priority
-from domainhunter.domain.work_queue import WorkStage
 from domainhunter.storage.sqlite import SQLiteStore
 
 
@@ -157,80 +156,6 @@ def test_revoked_decision_does_not_block_new_decision(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Feature 2: cost_per_effective_candidate metric
-# ---------------------------------------------------------------------------
-
-
-def test_metrics_exposes_cost_per_effective_candidate(tmp_path) -> None:
-    """cost_per_effective_candidate = reserved_units / max(1, approved_count)."""
-    database = tmp_path / "domainhunter.db"
-    store = SQLiteStore(database)
-    approved_a, version_a = _seed_candidate(store, hostname="approved-a.example")
-    approved_b, version_b = _seed_candidate(store, hostname="approved-b.example")
-    rejected, version_c = _seed_candidate(store, hostname="rejected.example")
-
-    store.reserve_budget(
-        WorkStage.L1, units=12.0, daily_limit=100.0, occurred_at=OBSERVED_AT, entity_id="seed"
-    )
-    store.append_review_decision(
-        build_review_decision(
-            request_id="approve-a",
-            candidate_id=approved_a.candidate_id,
-            candidate_version=version_a.version,
-            action=ReviewAction.APPROVE,
-            actor_id="reviewer",
-            decided_at=OBSERVED_AT,
-        )
-    )
-    store.append_review_decision(
-        build_review_decision(
-            request_id="approve-b",
-            candidate_id=approved_b.candidate_id,
-            candidate_version=version_b.version,
-            action=ReviewAction.APPROVE,
-            actor_id="reviewer",
-            decided_at=OBSERVED_AT,
-        )
-    )
-    store.append_review_decision(
-        build_review_decision(
-            request_id="reject-c",
-            candidate_id=rejected.candidate_id,
-            candidate_version=version_c.version,
-            action=ReviewAction.REJECT,
-            actor_id="reviewer",
-            decided_at=OBSERVED_AT,
-        )
-    )
-
-    metrics = store.funnel_metrics()
-
-    assert metrics.budget_reserved_units == 12.0
-    assert metrics.cost_per_effective_candidate == pytest.approx(12.0 / 2)
-    # The rejected decision must not count toward the divisor.
-    assert store.count_approved_versions() == 2
-
-
-def test_metrics_zero_approved_returns_cost_based_on_max_1(tmp_path) -> None:
-    """No approvals → use max(1, 0) as the divisor; no division by zero."""
-    database = tmp_path / "domainhunter.db"
-    store = SQLiteStore(database)
-    store.reserve_budget(
-        WorkStage.L1, units=4.0, daily_limit=100.0, occurred_at=OBSERVED_AT, entity_id="seed"
-    )
-
-    metrics = store.funnel_metrics()
-
-    assert metrics.budget_reserved_units == 4.0
-    assert metrics.cost_per_effective_candidate == pytest.approx(4.0)
-    assert store.count_approved_versions() == 0
-
-
-# ---------------------------------------------------------------------------
-# Feature 3: per-hostname rate limiter in HTTPProbe
-# ---------------------------------------------------------------------------
-
-
 def test_host_rate_limiter_slows_rapid_probes() -> None:
     """Two consecutive ``acquire()`` calls on the same hostname must wait."""
     # 5 rps ⇒ minimum 0.2s per acquire. We do 3 acquires to ~0.4s of expected

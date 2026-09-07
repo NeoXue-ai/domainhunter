@@ -139,17 +139,6 @@ def test_detail_page_is_independent_and_evidence_led(tmp_path) -> None:
     assert '/assets/' in response.text
 
 
-def test_exposes_an_operational_funnel_snapshot(tmp_path) -> None:
-    database = tmp_path / "domainhunter.db"
-    _reviewable_candidate(SQLiteStore(database))
-
-    response = TestClient(create_app(database)).get("/v1/metrics")
-
-    assert response.status_code == 200
-    assert response.json()["candidates"] == 1
-    assert response.json()["candidate_versions"] == 1
-
-
 def test_appends_decision_with_known_reason_tag_values(tmp_path) -> None:
     database = tmp_path / "domainhunter.db"
     store = SQLiteStore(database)

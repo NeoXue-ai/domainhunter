@@ -1,1 +1,1 @@
-"""Long-running scheduler daemon (spec §14 operations layer)."""
+"""Background daemons: strict CT discovery."""

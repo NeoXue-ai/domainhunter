@@ -16,17 +16,12 @@ from domainhunter.domain.candidates import (
     Evidence,
     EvidenceType,
 )
-from domainhunter.domain.outreach import OutreachEvent
 from domainhunter.domain.reviews import ReviewAction, build_review_decision
 from domainhunter.storage.sqlite import SQLiteStore
 
 
 NOW = datetime(2026, 8, 16, tzinfo=UTC)
 
-
-# Regression: ISSUE-001 — outreach stage strip was wired to candidate_versions
-# Found by /qa on 2026-08-31
-# Report: .gstack/qa-reports/qa-report-127-0-0-1-8000-2026-08-31.md
 
 
 def _seed_approved_human_version(store: SQLiteStore) -> tuple[str, int]:

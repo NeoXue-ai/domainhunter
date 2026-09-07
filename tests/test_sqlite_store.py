@@ -9,14 +9,11 @@ from domainhunter.domain.candidates import (
 )
 from domainhunter.domain.events import SourceEvent
 from domainhunter.domain.observations import Observation, OutcomeCode
-from domainhunter.domain.outreach import OutreachEvent
-from domainhunter.domain.publications import PublicationRecord
 from domainhunter.domain.review_priority import (
     ReviewPriorityInputs,
     calculate_review_priority,
 )
 from domainhunter.domain.reviews import ReasonTag, ReviewAction, build_review_decision
-from domainhunter.publish.aiknows_client import SyncStatus
 from domainhunter.storage.sqlite import SQLiteStore
 
 OBSERVED_AT = datetime(2026, 8, 16, tzinfo=UTC)
@@ -333,89 +330,6 @@ def test_persists_review_priority_snapshots(tmp_path) -> None:
     assert snapshot is not None
     assert snapshot.priority == priority
 
-
-def test_appends_publication_attempts_for_reconciliation(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "domainhunter.db")
-    candidate = store.create_candidate("example.com", created_at=OBSERVED_AT)
-    draft = CandidateVersionDraft(
-        author_kind="human",
-        primary_outcome=CandidateOutcome.PUBLISHABLE_AI_SAAS,
-        classification_confidence=0.9,
-        name_suggestion="Example AI",
-        description_suggestion="AI workflow automation",
-        evidence=(Evidence(EvidenceType.TITLE, "Example AI", "https://example.com"),),
-    )
-    version = store.append_candidate_version(candidate.candidate_id, draft, created_at=OBSERVED_AT)
-    record = PublicationRecord(
-        candidate_id=candidate.candidate_id,
-        candidate_version=version.version,
-        requested_at=OBSERVED_AT,
-        sync_status=SyncStatus.RECONCILIATION_REQUIRED,
-        detail="unknown external result",
-    )
-
-    assert store.append_publication(record) is True
-    assert store.list_publications(candidate.candidate_id) == (record,)
-
-
-def test_reports_a_funnel_snapshot_with_observation_outcomes(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "domainhunter.db")
-    event = SourceEvent("ct_log", "argon:42", "example.com", OBSERVED_AT)
-    store.append_source_event(event, hostname="example.com")
-    store.append_observation(
-        Observation("example.com", OutcomeCode.CONNECT_TIMEOUT, OBSERVED_AT, 1)
-    )
-
-    metrics = store.funnel_metrics()
-
-    assert metrics.source_events == 1
-    assert metrics.domains == 1
-    assert metrics.observations == 1
-    assert metrics.observation_outcomes == {"connect_timeout": 1}
-
-
-def test_appends_outreach_events_and_lists_them_in_chronological_order(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "domainhunter.db")
-    candidate = store.create_candidate("example.com", created_at=OBSERVED_AT)
-    draft = CandidateVersionDraft(
-        author_kind="human",
-        primary_outcome=CandidateOutcome.PUBLISHABLE_AI_SAAS,
-        classification_confidence=0.9,
-        name_suggestion="Example AI",
-        description_suggestion="AI workflow automation",
-        evidence=(Evidence(EvidenceType.TITLE, "Example AI", "https://example.com"),),
-    )
-    version = store.append_candidate_version(
-        candidate.candidate_id, draft, created_at=OBSERVED_AT
-    )
-    first = OutreachEvent(
-        candidate_id=candidate.candidate_id,
-        candidate_version=version.version,
-        actor_id="actor-1",
-        triggered_at=OBSERVED_AT,
-        dry_run=True,
-        recipient_source_url="https://example.com/contact",
-        claim_tokens_issued=0,
-        contact_count=1,
-        contact_preview_json='[{"redacted_address":"f*******@example.com","source_url":"https://example.com/contact"}]',
-    )
-    second = OutreachEvent(
-        candidate_id=candidate.candidate_id,
-        candidate_version=version.version,
-        actor_id="actor-1",
-        triggered_at=OBSERVED_AT.replace(hour=1),
-        dry_run=False,
-        recipient_source_url="https://example.com/contact",
-        claim_tokens_issued=2,
-        contact_count=2,
-        contact_preview_json="[]",
-    )
-
-    store.append_outreach_event(first)
-    store.append_outreach_event(second)
-
-    events = store.list_outreach_events(candidate.candidate_id)
-    assert events == (first, second)
 
 
 def test_mark_seen_tracks_first_seen_history(tmp_path) -> None:

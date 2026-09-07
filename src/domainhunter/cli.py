@@ -440,54 +440,6 @@ def _serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _outreach(args: argparse.Namespace) -> int:
-    """Dry-run outreach trigger for one approved human candidate version.
-
-    The CLI bypasses the HTTP server and reuses the FastAPI app via its
-    TestClient so the local endpoint remains the single source of truth.
-    """
-    from fastapi.testclient import TestClient
-
-    app = create_app(args.database)
-    payload: dict[str, object] = {
-        "request_id": args.request_id or f"cli-outreach-{datetime.now(UTC).timestamp()}",
-        "dry_run": True,
-    }
-    if args.recipient_source_url:
-        payload["recipient_source_url"] = args.recipient_source_url
-    response = TestClient(app).post(
-        f"/v1/candidates/{args.candidate_id}/versions/{args.version}/outreach",
-        json=payload,
-        headers={"X-Actor-ID": args.actor_id},
-    )
-    _print_json({"status_code": response.status_code, "body": response.json()})
-    return 0 if response.status_code < 400 else 1
-
-
-def _reopen(args: argparse.Namespace) -> int:
-    """Reopen one terminal candidate via the local FastAPI app.
-
-    The CLI bypasses the HTTP server and reuses the FastAPI app via its
-    TestClient so the local endpoint remains the single source of truth.
-    """
-    from fastapi.testclient import TestClient
-
-    app = create_app(args.database)
-    payload: dict[str, object] = {
-        "request_id": args.request_id or f"cli-reopen-{datetime.now(UTC).timestamp()}",
-        "trigger_source_event_id": args.trigger_source_event_id,
-        "new_outcome": args.new_outcome,
-        "reason": args.reason,
-    }
-    response = TestClient(app).post(
-        f"/v1/candidates/{args.candidate_id}/reopen",
-        json=payload,
-        headers={"X-Actor-ID": args.actor_id},
-    )
-    _print_json({"status_code": response.status_code, "body": response.json()})
-    return 0 if response.status_code < 400 else 1
-
-
 def _enrich_llm(args: argparse.Namespace) -> int:
     """Run one LLM enrichment pass against the latest rule-authored version."""
     store = SQLiteStore(args.database)
@@ -717,29 +669,6 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--tier1-days", type=int, default=30)
     discover.add_argument("--tier2-days", type=int, default=90)
     discover.set_defaults(handler=_discover)
-
-    outreach = subparsers.add_parser(
-        "outreach", help="dry-run outreach for an approved candidate version"
-    )
-    outreach.add_argument("--database", required=True, type=Path)
-    outreach.add_argument("--candidate-id", required=True)
-    outreach.add_argument("--version", required=True, type=int)
-    outreach.add_argument("--actor-id", required=True)
-    outreach.add_argument("--recipient-source-url")
-    outreach.add_argument("--request-id")
-    outreach.set_defaults(handler=_outreach)
-
-    reopen = subparsers.add_parser(
-        "reopen", help="reopen one terminal candidate and reset its retry counter"
-    )
-    reopen.add_argument("--database", required=True, type=Path)
-    reopen.add_argument("--candidate-id", required=True)
-    reopen.add_argument("--trigger-source-event-id", required=True)
-    reopen.add_argument("--new-outcome", required=True)
-    reopen.add_argument("--reason", required=True)
-    reopen.add_argument("--actor-id", required=True)
-    reopen.add_argument("--request-id")
-    reopen.set_defaults(handler=_reopen)
 
     enrich_llm = subparsers.add_parser(
         "enrich-llm", help="enrich one candidate version through an LLM provider"

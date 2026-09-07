@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,8 @@ from domainhunter.ingest.ct_poller import CTPoller
 from domainhunter.llm.provider import MockLLMProvider, OpenAICompatibleProvider
 from domainhunter.pipeline import DomainHunterPipeline
 from domainhunter.storage.sqlite import SQLiteStore
+
+_LOGGER = logging.getLogger("domainhunter.cli")
 
 
 def _parse_datetime(value: str) -> datetime:
@@ -78,7 +81,25 @@ def _status(args: argparse.Namespace) -> int:
 def _discover(args: argparse.Namespace) -> int:
     """Run direct strict CT polling and optional LLM enrichment on a loop."""
 
+    import logging
+
     from domainhunter.scheduler.ct_discovery import CTDiscoveryDaemon
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    _LOGGER.info(
+        "discover starting: database=%s logs=%s round_seconds=%s provider=%s",
+        args.database,
+        [t.log_id for t in (args.logs or (DEFAULT_LOG,))],
+        args.round_seconds,
+        args.provider,
+    )
+    _LOGGER.info(
+        "each round polls new CT entries, filters, probes, and queues "
+        "candidates; Ctrl-C stops"
+    )
 
     store = SQLiteStore(args.database)
     logs = tuple(args.logs) if args.logs else (DEFAULT_LOG,)
@@ -132,7 +153,11 @@ def _discover(args: argparse.Namespace) -> int:
                     await daemon.run(max_rounds=args.max_rounds)
                 return daemon
 
-    daemon = asyncio.run(run())
+    try:
+        daemon = asyncio.run(run())
+    except KeyboardInterrupt:
+        print("\ndiscover: stopped by Ctrl-C", flush=True)
+        return 0
     _print_json(
         {
             "rounds": daemon.round,

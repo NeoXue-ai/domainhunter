@@ -199,6 +199,9 @@ class SQLiteStore:
 
     def __init__(self, database_path: str | Path) -> None:
         self._database_path = Path(database_path)
+        parent = self._database_path.parent
+        if str(parent) not in ("", "."):
+            parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
     @contextmanager

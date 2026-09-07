@@ -312,6 +312,15 @@ def test_appends_review_decisions_idempotently_and_keeps_action_history(tmp_path
     assert decisions[0].reason_tags == (ReasonTag.INSUFFICIENT_EVIDENCE,)
 
 
+def test_creates_database_in_missing_nested_directory(tmp_path) -> None:
+    nested = tmp_path / "level1" / "level2" / "domainhunter.db"
+
+    store = SQLiteStore(nested)
+
+    assert nested.exists()
+    store.list_domains()
+
+
 def test_persists_review_priority_snapshots(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "domainhunter.db")
     candidate = store.create_candidate("example.com", created_at=OBSERVED_AT)

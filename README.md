@@ -81,8 +81,9 @@ bounded HTTP probe → candidates queued for review. Repeat `--log` to
 poll more sources. Runs forever until Ctrl-C; with `--max-rounds` a
 source failure exits non-zero instead of looking like "no candidates".
 
-Drop the `--provider*` flags to run rules-only (S1-S4); attach any
-OpenAI-compatible endpoint for S5 classification. Providers known to
+By default discovery runs rules-only (S1-S4, no LLM, no API key). To
+attach S5 classification, add `--provider openai-compatible` plus the
+endpoint flags. Providers known to
 work: DeepSeek (`deepseek-chat`), MiniMax (`MiniMax-M3`), OpenAI
 (`gpt-4o-mini`), Ollama (`http://localhost:11434`), vLLM. Reasoning
 models are handled (thinking preambles stripped, JSON extracted from

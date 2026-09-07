@@ -82,9 +82,10 @@ def _discover(args: argparse.Namespace) -> int:
 
     store = SQLiteStore(args.database)
     logs = tuple(args.logs) if args.logs else (DEFAULT_LOG,)
+    provider = None
     if args.provider == "mock":
         provider = MockLLMProvider()
-    else:
+    elif args.provider == "openai-compatible":
         token = args.token or (
             os.environ.get(args.token_env) if args.token_env else None
         )
@@ -204,8 +205,11 @@ def _build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--page-size", type=int, default=500)
     discover.add_argument(
         "--provider",
-        choices=("mock", "openai-compatible"),
-        default="openai-compatible",
+        choices=("none", "mock", "openai-compatible"),
+        default="none",
+        help="S5 LLM classification: none = rules-only (default), "
+        "mock = deterministic test provider, openai-compatible = any "
+        "OpenAI-compatible endpoint (requires --token or --token-env)",
     )
     discover.add_argument("--base-url")
     discover.add_argument("--model")

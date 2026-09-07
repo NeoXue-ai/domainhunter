@@ -2,17 +2,13 @@
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from dataclasses import asdict
-import json
 from pathlib import Path
-from typing import Protocol
 
 from fastapi import FastAPI, Header, HTTPException, Response, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from domainhunter.domain.observations import Observation, OutcomeCode
 from domainhunter.domain.reviews import ReasonTag, ReviewAction, build_review_decision
 from domainhunter.domain.verification import CandidateVerification
 from domainhunter.crawler.http_probe import HTTPProbe
@@ -36,37 +32,6 @@ class ReviewDecisionRequest(BaseModel):
 class RevokeRequest(BaseModel):
     request_id: str = Field(min_length=1)
     reason: str = ""
-
-
-class UnpublishRequest(BaseModel):
-    request_id: str = Field(min_length=1)
-    external_entry_id: str = Field(min_length=1)
-    external_version: str | None = None
-    reason: str = ""
-
-
-class OutreachRequest(BaseModel):
-    request_id: str = Field(min_length=1)
-    dry_run: bool = True
-    recipient_source_url: str | None = None
-
-
-class ReopenRequest(BaseModel):
-    request_id: str = Field(min_length=1)
-    trigger_source_event_id: str = Field(min_length=1)
-    new_outcome: str = Field(min_length=1)
-    reason: str = Field(min_length=1)
-
-
-class BudgetUpdateRequest(BaseModel):
-    daily_limit: float = Field(gt=0.0)
-
-
-class StagePauseRequest(BaseModel):
-    stage: str = Field(min_length=1)
-    paused: bool
-    reason: str = Field(min_length=1)
-
 
 
 class DiscoveryRunRequest(BaseModel):

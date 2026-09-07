@@ -37,6 +37,8 @@ const DICT = {
   zh: {
     brandSubtitle: "网络侦测控制台",
     scanBtn: "触发探针轮询",
+    runtimeLog: "运行日志",
+    runtimeLogEmpty: "discover 未在运行或暂无日志",
     topPrioritySection: "CRITICAL TARGET // 优先侦查标的",
     otherCandidatesSection: "ACTIVE QUEUE // 待裁定流",
     priorityPrefix: "SCORE",
@@ -110,6 +112,8 @@ const DICT = {
   en: {
     brandSubtitle: "Discovery Console",
     scanBtn: "Dispatch CT Probe",
+    runtimeLog: "Runtime log",
+    runtimeLogEmpty: "discover is not running or no log yet",
     topPrioritySection: "CRITICAL TARGET // Priority Triage",
     otherCandidatesSection: "ACTIVE QUEUE // Ingestion Stream",
     priorityPrefix: "SCORE",
@@ -232,20 +236,8 @@ export interface CandidateDetail extends CandidateSummary {
   };
 }
 
-export interface ScanResult {
-  status: "completed" | "queued" | "no_candidates" | "failed";
-  sampledSignals?: number;
-  distinctDomains?: number;
-  strictRejections?: number;
-  probesRun?: number;
-  candidatesCreated?: number;
-  pendingWork?: number;
-  sourceErrors?: string[];
-  errorSummary?: string;
-}
 
 export type ReviewAction = "approve" | "defer" | "reject" | "blocklist";
-
 const INITIAL_DATA: CandidateDetail[] = [
   {
     id: "NODE-8812-LIMITLESS",
@@ -360,17 +352,6 @@ const api = {
     if (!item) throw new Error("NODE_ID_NOT_FOUND");
     return { ...item };
   },
-  async runScan(): Promise<ScanResult> {
-    await new Promise((r) => setTimeout(r, 1600));
-    return {
-      status: "completed",
-      sampledSignals: 2481,
-      distinctDomains: 812,
-      strictRejections: 809,
-      probesRun: 15,
-      candidatesCreated: 3
-    };
-  },
   async submitReview(id: string, action: ReviewAction, actorId: string, version: number): Promise<void> {
     await new Promise((r) => setTimeout(r, 260));
     const target = globalStore.find((c) => c.id === id);
@@ -433,20 +414,11 @@ const liveApi = {
     if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
     return toCandidate(body);
   },
-  async runScan(): Promise<ScanResult> {
-    const response = await fetch("/v1/run/discovery", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_probes: 20 }) });
+  async fetchLog(tail = 120): Promise<string[]> {
+    const response = await fetch(`/v1/discovery/log?tail=${tail}`, { cache: "no-store" });
     const body = await response.json();
     if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
-    return {
-      status: body.status,
-      sampledSignals: body.certificates_seen,
-      distinctDomains: body.roots_observed,
-      strictRejections: body.strict_rejections,
-      probesRun: body.probes_run,
-      candidatesCreated: body.candidates_created,
-      pendingWork: body.pending_work,
-      sourceErrors: body.source_errors,
-    };
+    return body.lines || [];
   },
   async submitReview(id: string, action: ReviewAction, actorId: string, version: number): Promise<void> {
     const response = await fetch(`/v1/candidates/${encodeURIComponent(id)}/versions/${version}/decisions`, { method: "POST", headers: { "Content-Type": "application/json", "X-Actor-ID": actorId }, body: JSON.stringify({ request_id: crypto.randomUUID(), action, reason_tags: [] }) });
@@ -507,325 +479,50 @@ const ConsoleBadge: React.FC<{ status: EvidenceStatus; text?: string; lang: Lang
   );
 };
 
-const ScanResultHUD: React.FC<{ result: ScanResult; lang: Language }> = ({ result, lang }) => {
-  const sampled = useCounter(result.sampledSignals || 0, 600);
-  const domains = useCounter(result.distinctDomains || 0, 600);
-  const rejections = useCounter(result.strictRejections || 0, 600);
-  const created = useCounter(result.candidatesCreated || 0, 600);
-  const pending = useCounter(result.pendingWork || 0, 600);
-  const d = DICT[lang];
 
-  return (
-    <div className="grid grid-cols-2 gap-2 font-mono text-xs">
-      <div className="p-3 bg-slate-100/50 dark:bg-black/40 border border-slate-200 dark:border-slate-800 rounded-md">
-        <div className="text-slate-500 text-[10px] tracking-wider uppercase">SAMPLED_CT</div>
-        <div className="text-base font-bold text-slate-800 dark:text-slate-200 mt-1">{sampled}</div>
-      </div>
-      <div className="p-3 bg-slate-100/50 dark:bg-black/40 border border-slate-200 dark:border-slate-800 rounded-md">
-        <div className="text-slate-500 text-[10px] tracking-wider uppercase">DISTINCT_APEX</div>
-        <div className="text-base font-bold text-slate-800 dark:text-slate-200 mt-1">{domains}</div>
-      </div>
-      <div className="p-3 bg-slate-100/50 dark:bg-black/40 border border-slate-200 dark:border-slate-800 rounded-md">
-        <div className="text-slate-500 text-[10px] tracking-wider uppercase">GATE_DROPPED</div>
-        <div className="text-base font-bold text-slate-800 dark:text-slate-200 mt-1">{rejections}</div>
-      </div>
-      <div className="p-3 bg-emerald-500/10 border border-emerald-500/40 rounded-md animate-pop">
-        <div className="text-emerald-700 dark:text-emerald-400 text-[10px] tracking-wider uppercase font-bold">INGESTED</div>
-        <div className="text-base font-bold text-emerald-600 dark:text-emerald-300 mt-1">+{created}</div>
-      </div>
-      {(result.pendingWork || 0) > 0 && (
-        <div className="col-span-2 p-3 bg-amber-500/10 border border-amber-500/40 rounded-md">
-          <div className="text-amber-700 dark:text-amber-400 text-[10px] tracking-wider uppercase font-bold">{d.statPendingWork}</div>
-          <div className="text-base font-bold text-amber-700 dark:text-amber-300 mt-1">{pending}</div>
-        </div>
-      )}
-    </div>
-  );
-};
-
-const ScanRunNotices: React.FC<{ result: ScanResult; lang: Language }> = ({ result, lang }) => {
-  const d = DICT[lang];
-  const pendingWork = result.pendingWork || 0;
-  const sourceErrors = result.sourceErrors || [];
-
-  if (pendingWork === 0 && sourceErrors.length === 0) return null;
-
-  return (
-    <div className="space-y-2 text-[11px] font-sans leading-relaxed">
-      {pendingWork > 0 && (
-        <div className="flex gap-2 p-3 bg-blue-50 dark:bg-blue-950/25 border border-blue-200 dark:border-blue-900/70 rounded-md text-blue-800 dark:text-blue-200">
-          <Activity className="w-3.5 h-3.5 mt-0.5 shrink-0 text-blue-500" />
-          <span>{d.queuedWork.replace("{n}", String(pendingWork))}</span>
-        </div>
-      )}
-      {sourceErrors.length > 0 && (
-        <div className="p-3 bg-amber-50 dark:bg-amber-950/25 border border-amber-200 dark:border-amber-900/70 rounded-md text-amber-800 dark:text-amber-200 space-y-1">
-          <div className="flex gap-2">
-            <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-500" />
-            <span>{d.partialSourceFailure}</span>
-          </div>
-          <ul className="pl-5 list-disc font-mono text-[10px] text-amber-700 dark:text-amber-300">
-            {sourceErrors.slice(0, 3).map((error) => <li key={error}>{error}</li>)}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-};
-
-const ScanModal: React.FC<{
-  isOpen: boolean;
-  onClose: () => void;
-  onSuccessReload: () => void;
-  lang: Language;
-}> = ({ isOpen, onClose, onSuccessReload, lang }) => {
-  const [stage, setStage] = useState<"idle" | "running" | "result">("idle");
-  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
-  const [copied, setCopied] = useState(false);
+const LogPanel: React.FC<{ lang: Language }> = ({ lang }) => {
+  const [lines, setLines] = useState<string[]>([]);
+  const [exists, setExists] = useState(true);
   const d = DICT[lang];
 
   useEffect(() => {
-    if (!isOpen) {
-      setStage("idle");
-      setScanResult(null);
-      setCopied(false);
-    }
-  }, [isOpen]);
-
-  if (!isOpen) return null;
-
-  const handleStartScan = async () => {
-    setStage("running");
-    try {
-      const res = await liveApi.runScan();
-      setScanResult(res);
-      setStage("result");
-    } catch (err: unknown) {
-      setStage("result");
-      setScanResult({
-        status: "failed",
-        errorSummary: (err as Error)?.message || "PROBE_NETWORK_TIMEOUT"
-      });
-    }
-  };
-
-  const handleCopy = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+    let alive = true;
+    const load = async () => {
+      try {
+        const fetched = await liveApi.fetchLog();
+        if (!alive) return;
+        setExists(true);
+        setLines(fetched);
+      } catch {
+        if (alive) setExists(false);
+      }
+    };
+    load();
+    const timer = window.setInterval(load, 5000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-4 animate-in fade-in duration-100"
-      role="dialog"
-      aria-modal="true"
-    >
-      <div className="w-full max-w-md bg-white dark:bg-[#10141C] text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-800 rounded-lg shadow-2xl overflow-hidden font-mono">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#141A24]">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
-            <Terminal className="w-3.5 h-3.5 text-blue-500" />
-            <span>{d.scanModalTitle}</span>
-          </div>
-          {stage !== "running" && (
-            <button onClick={onClose} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 p-1">
-              <X className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
-
-        <div className="p-5">
-          {stage === "idle" && (
-            <div className="space-y-4 text-xs">
-              <p className="text-slate-600 dark:text-slate-400 leading-relaxed font-sans">{d.scanModalDesc}</p>
-              <div className="p-3 bg-slate-50 dark:bg-black/50 border border-slate-200 dark:border-slate-800/80 rounded-md space-y-1 text-slate-600 dark:text-slate-400">
-                <div className="text-slate-800 dark:text-slate-200 font-bold flex items-center gap-1.5 text-[11px]">
-                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
-                  <span>{d.scanRuleHeading}</span>
-                </div>
-                <div className="text-[11px] font-sans leading-normal pl-5 text-slate-500">
-                  {d.scanRuleDesc}
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800/80">
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800/50 rounded-md"
-                >
-                  {d.cancel}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleStartScan}
-                  className="px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-md shadow-xs"
-                >
-                  {d.startScan}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {stage === "running" && (
-            <div className="py-8 text-center space-y-3">
-              <RotateCw className="w-6 h-6 text-blue-500 animate-spin mx-auto" />
-              <div className="text-xs font-bold text-slate-800 dark:text-slate-200">{d.scanningTitle}</div>
-              <p className="text-[11px] text-slate-500 font-sans">{d.scanningDesc}</p>
-            </div>
-          )}
-
-          {stage === "result" && scanResult && (
-            <div className="space-y-4">
-              {scanResult.status === "completed" && (
-                <div className="space-y-4">
-                  <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400 font-bold text-xs">
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>{d.scanSuccess}</span>
-                  </div>
-
-                  <ScanResultHUD result={scanResult} lang={lang} />
-                  <ScanRunNotices result={scanResult} lang={lang} />
-
-                  <div className="flex justify-end gap-2 pt-2">
-                    {(scanResult.pendingWork || 0) > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onSuccessReload();
-                          handleStartScan();
-                        }}
-                        className="px-3 py-1.5 text-xs font-bold border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-md"
-                      >
-                        {d.continueScan}
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onSuccessReload();
-                        onClose();
-                      }}
-                      className="px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-md"
-                    >
-                      {d.viewNewCandidates}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {scanResult.status === "queued" && (
-                <div className="space-y-4">
-                  <div className="flex items-center gap-2 text-blue-700 dark:text-blue-300 font-bold text-xs">
-                    <Activity className="w-4 h-4" />
-                    <span>{d.scanQueued}</span>
-                  </div>
-
-                  <ScanResultHUD result={scanResult} lang={lang} />
-                  <ScanRunNotices result={scanResult} lang={lang} />
-
-                  <div className="flex justify-end gap-2 pt-2">
-                    <button
-                      type="button"
-                      onClick={onClose}
-                      className="px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-md"
-                    >
-                      {d.cancel}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleStartScan}
-                      className="px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-md"
-                    >
-                      {d.continueScan}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {scanResult.status === "no_candidates" && (
-                <div className="space-y-4">
-                  <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 font-bold text-xs">
-                    <CheckCheck className="w-4 h-4 text-slate-500" />
-                    <span>{d.scanNoCandidates}</span>
-                  </div>
-
-                  <ScanResultHUD result={scanResult} lang={lang} />
-                  <p className="p-3 bg-slate-50 dark:bg-black/30 border border-slate-200 dark:border-slate-800 rounded-md text-[11px] font-sans leading-relaxed text-slate-600 dark:text-slate-400">
-                    {d.noCandidatesDesc}
-                  </p>
-                  <ScanRunNotices result={scanResult} lang={lang} />
-
-                  <div className="flex justify-end gap-2 pt-2">
-                    <button
-                      type="button"
-                      onClick={onClose}
-                      className="px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-md"
-                    >
-                      {d.cancel}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleStartScan}
-                      className="px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-md"
-                    >
-                      {d.retry}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {scanResult.status === "failed" && (
-                <div className="space-y-4 text-xs">
-                  <div className="flex items-center gap-2 text-rose-600 dark:text-rose-400 font-bold">
-                    <AlertCircle className="w-4 h-4" />
-                    <span>{d.scanFailed}</span>
-                  </div>
-                  <div className="p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 rounded-md flex justify-between items-center text-rose-700 dark:text-rose-300">
-                    <span className="truncate pr-2">{scanResult.errorSummary}</span>
-                    <button
-                      type="button"
-                      onClick={() => handleCopy(scanResult.errorSummary || "")}
-                      className="p-1 hover:bg-rose-100 dark:hover:bg-rose-900/60 rounded text-rose-600 shrink-0"
-                    >
-                      {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-                  <div className="flex justify-end gap-2 pt-2">
-                    <button
-                      type="button"
-                      onClick={onClose}
-                      className="px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-md"
-                    >
-                      {d.cancel}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleStartScan}
-                      className="px-4 py-1.5 text-xs font-bold bg-blue-600 text-white rounded-md hover:bg-blue-500"
-                    >
-                      {d.retry}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+    <section className="border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#141A24] text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+        <Terminal className="w-3 h-3 text-blue-500" />
+        <span>{d.runtimeLog}</span>
+        <span className="ml-auto text-slate-400 dark:text-slate-600">auto-refresh 5s</span>
       </div>
-    </div>
+      <pre className="px-4 py-3 max-h-64 overflow-auto text-[10px] leading-relaxed font-mono text-slate-600 dark:text-slate-400 bg-white dark:bg-black/40">
+        {lines.length === 0 ? d.runtimeLogEmpty : lines.join("\n")}
+      </pre>
+    </section>
   );
 };
-
-// ==========================================
-// 6. 收件箱：已去除十字角标 + 极简纯粹工程卡片
-// ==========================================
 
 const InboxView: React.FC<{
   onSelectCandidate: (id: string) => void;
   searchQuery: string;
   onSearchChange: (q: string) => void;
-  onOpenScan: () => void;
   candidates: CandidateSummary[];
   isLoading: boolean;
   error: string | null;
@@ -835,7 +532,6 @@ const InboxView: React.FC<{
   onSelectCandidate,
   searchQuery,
   onSearchChange,
-  onOpenScan,
   candidates,
   isLoading,
   error,
@@ -909,13 +605,7 @@ const InboxView: React.FC<{
           <Cpu className="w-8 h-8 text-slate-400 dark:text-slate-600 mx-auto" />
           <div className="text-sm font-bold tracking-wider text-slate-800 dark:text-slate-300 uppercase">{d.emptyTitle}</div>
           <p className="text-xs text-slate-500 font-sans max-w-sm mx-auto">{d.emptyDesc}</p>
-          <button
-            onClick={onOpenScan}
-            className="px-4 py-1.5 text-xs font-bold uppercase bg-blue-600 hover:bg-blue-500 text-white rounded-md shadow-xs"
-          >
-            {d.scanBtn}
-          </button>
-        </div>
+                  </div>
       ) : (
         <div className="space-y-8">
           {/* 1. CRITICAL TARGET: 顶部优先侦查标的 (已去四角加号，纯净亚光包边) */}
@@ -1034,6 +724,8 @@ const InboxView: React.FC<{
           )}
         </div>
       )}
+
+      <LogPanel lang={lang} />
     </div>
   );
 };
@@ -1547,7 +1239,6 @@ export default function App() {
     return match ? `#/candidate/${decodeURIComponent(match[1])}` : "#/";
   };
   const [currentRoute, setCurrentRoute] = useState<string>(routeFromLocation);
-  const [scanModalOpen, setScanModalOpen] = useState(false);
   const [actorId, setActorId] = useState<string>(() => localStorage.getItem("dh_actor_id") || "");
 
   const [lang, setLang] = useState<Language>(() => {
@@ -1677,14 +1368,7 @@ export default function App() {
 
             <div className="h-3 w-px bg-slate-200 dark:bg-slate-800 mx-0.5" />
 
-            <button
-              type="button"
-              onClick={() => setScanModalOpen(true)}
-              className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider bg-blue-600 hover:bg-blue-500 text-white rounded-md shadow-xs transition active:scale-[0.98]"
-            >
-              {d.scanBtn}
-            </button>
-          </div>
+                      </div>
         </div>
       </header>
 
@@ -1706,19 +1390,12 @@ export default function App() {
             onRetry={loadCandidates}
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
-            onOpenScan={() => setScanModalOpen(true)}
             onSelectCandidate={(id) => navigateTo(`#/candidate/${id}`)}
             lang={lang}
           />
         )}
       </main>
 
-      <ScanModal
-        isOpen={scanModalOpen}
-        onClose={() => setScanModalOpen(false)}
-        onSuccessReload={loadCandidates}
-        lang={lang}
-      />
     </div>
   );
 }

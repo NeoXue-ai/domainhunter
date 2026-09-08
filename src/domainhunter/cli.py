@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import uvicorn
@@ -232,6 +232,7 @@ def _backfill(args: argparse.Namespace) -> int:
     async def run() -> dict[str, object]:
         config = BackfillConfig(
             hours=args.hours,
+            entries=args.entries,
             page_delay_seconds=args.page_delay,
             claim_limit=args.claim_limit,
             round_delay_seconds=args.round_delay,
@@ -268,6 +269,7 @@ def _backfill(args: argparse.Namespace) -> int:
                     probe_limit=config.claim_limit,
                     provider=provider,
                     probe_concurrency=config.probe_concurrency,
+                    filter_retry_delay=timedelta(seconds=args.filter_retry_delay),
                 )
 
                 def progress(event: dict[str, object]) -> None:
@@ -353,7 +355,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="replay a past CT window through the discovery funnel",
     )
     backfill_cmd.add_argument("--database", required=True, type=Path)
-    backfill_cmd.add_argument("--hours", type=float, default=24.0)
+    backfill_cmd.add_argument(
+        "--hours", type=float, default=None,
+        help="replay the past N hours (ignored when --entries is given)",
+    )
+    backfill_cmd.add_argument(
+        "--entries", type=int, default=None,
+        help="replay the last N log entries (immune to STH cache lag; "
+        "recommended for the first run)",
+    )
     backfill_cmd.add_argument(
         "--log", action="append", dest="logs", type=_parse_log_spec, default=None,
         help="log spec of the form log_id=base_url; repeat for multiple logs",
@@ -366,6 +376,11 @@ def _build_parser() -> argparse.ArgumentParser:
     backfill_cmd.add_argument("--dns-concurrency", type=int, default=30)
     backfill_cmd.add_argument("--probe-concurrency", type=int, default=16)
     backfill_cmd.add_argument("--page-fetch-concurrency", type=int, default=8)
+    backfill_cmd.add_argument(
+        "--filter-retry-delay", type=float, default=300.0,
+        help="seconds before failed DNS/RDAP filter checks are retried "
+        "(backfill wants a small value; realtime uses the 300s default)",
+    )
     backfill_cmd.add_argument("--max-rounds", type=int)
     backfill_cmd.add_argument("--tier1-days", type=int, default=30)
     backfill_cmd.add_argument("--tier2-days", type=int, default=90)

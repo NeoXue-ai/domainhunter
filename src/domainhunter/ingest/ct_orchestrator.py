@@ -64,6 +64,7 @@ class CTIngestOrchestrator:
         provider: LLMProvider | None = None,
         work_lease_seconds: float = 300.0,
         probe_concurrency: int = 1,
+        filter_retry_delay: timedelta = timedelta(minutes=5),
     ) -> None:
         if probe_limit < 1:
             raise ValueError("probe_limit must be positive")
@@ -80,6 +81,7 @@ class CTIngestOrchestrator:
         self._provider = provider
         self._work_lease_seconds = work_lease_seconds
         self._probe_concurrency = probe_concurrency
+        self._filter_retry_delay = filter_retry_delay
 
     async def run_once(
         self, *, observed_at: datetime | None = None
@@ -140,7 +142,7 @@ class CTIngestOrchestrator:
                         self._store.retry_ct_discovery_work(
                             decision.domain,
                             lease_token=work_by_domain[decision.domain].lease_token,
-                            scheduled_at=stamp + timedelta(minutes=5),
+                            scheduled_at=stamp + self._filter_retry_delay,
                             error=decision.reason,
                         )
             elif set(roots_to_probe) != set(work_by_domain):
@@ -148,7 +150,7 @@ class CTIngestOrchestrator:
                     self._store.retry_ct_discovery_work(
                         root,
                         lease_token=work_by_domain[root].lease_token,
-                        scheduled_at=stamp + timedelta(minutes=5),
+                        scheduled_at=stamp + self._filter_retry_delay,
                         error="filter_rejected_without_retry_metadata",
                     )
         candidates_created = 0

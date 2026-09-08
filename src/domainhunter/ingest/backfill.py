@@ -41,7 +41,8 @@ _LOGGER = logging.getLogger("domainhunter.backfill")
 class BackfillConfig:
     """Knobs for one backfill run. All bounded on purpose."""
 
-    hours: float
+    hours: float | None = None
+    entries: int | None = None
     page_delay_seconds: float = 0.25
     claim_limit: int = 400
     round_delay_seconds: float = 10.0
@@ -52,8 +53,12 @@ class BackfillConfig:
     max_rounds: int | None = None
 
     def __post_init__(self) -> None:
-        if self.hours <= 0:
+        if self.hours is not None and self.hours <= 0:
             raise ValueError("hours must be positive")
+        if self.entries is not None and self.entries <= 0:
+            raise ValueError("entries must be positive")
+        if (self.hours is None) == (self.entries is None):
+            raise ValueError("provide exactly one of --hours or --entries")
         if self.page_delay_seconds < 0:
             raise ValueError("page_delay_seconds must be non-negative")
         if self.claim_limit < 1:
@@ -153,16 +158,37 @@ async def run_backfill(
     ``digest_once()`` must run one orchestrator round.
     """
     report = progress or (lambda event: _LOGGER.info("%s", event))
-    since = datetime.now(UTC) - timedelta(hours=config.hours)
+    since = (
+        datetime.now(UTC) - timedelta(hours=config.hours)
+        if config.hours is not None
+        else None
+    )
 
     stored_map = _parse_stored_cursor(store.get_source_cursor(poller.source_name))
     tree_sizes = await fetcher.tree_sizes()
     start_indices: dict[str, int] = {}
     resume_indices: dict[str, int] = {}
     for target in fetcher.logs:
-        located = await locate_start_index(
-            fetcher, log_id=target.log_id, since=since, tree_size=tree_sizes[target.log_id]
-        )
+        if config.entries is not None:
+            located = max(0, tree_sizes[target.log_id] - config.entries)
+        else:
+            located = await locate_start_index(
+                fetcher,
+                log_id=target.log_id,
+                since=since,  # type: ignore[arg-type]
+                tree_size=tree_sizes[target.log_id],
+            )
+            if located >= tree_sizes[target.log_id]:
+                report(
+                    {
+                        "event": "backfill.window_empty",
+                        "log": target.log_id,
+                        "hint": (
+                            "the log tail lags its public STH by tens of minutes; "
+                            "use --entries N instead of --hours for count-based windows"
+                        ),
+                    }
+                )
         stored = stored_map.get(target.log_id)
         # Resume when the stored cursor already sits inside this window.
         resume = located
@@ -293,22 +319,40 @@ async def _ingest_log_window(
     """
     probe_raw, _ = await fetcher.fetch_entries(log_id, start, min(start + 499, tree_size - 1))
     stride = max(len(probe_raw), 1)
+    probe_covered = start + len(probe_raw)
 
     spans: list[tuple[int, int]] = []
-    probe_covered = start + len(probe_raw)
-    if probe_covered < start + 500 and tree_size - 1 >= probe_covered:
-        spans.append((probe_covered, min(start + 499, tree_size - 1)))
     first_span_end = min(start + 499, tree_size - 1)
+    if probe_covered <= first_span_end:
+        spans.append((probe_covered, first_span_end))
     cursor_pos = first_span_end + 1
     while cursor_pos < tree_size:
         spans.append((cursor_pos, min(cursor_pos + stride - 1, tree_size - 1)))
         cursor_pos += stride
 
     queue: asyncio.Queue[tuple[int, tuple[tuple[str, tuple[str, ...], str | None], int, int]] | None] = asyncio.Queue()
-    total_ingested = 0
-    pages_done = 0
-    covered: dict[int, int] = {}
+    pages_done = 1
+    covered: dict[int, int] = {start: probe_covered}
     contiguous = start
+    while contiguous in covered:
+        contiguous = covered.pop(contiguous)
+    certs: list[tuple[str, tuple[str, ...], str | None]] = []
+    for offset, entry in enumerate(probe_raw):
+        hostnames, issuer = parse_leaf_input(entry.get("leaf_input", ""))
+        if not hostnames:
+            continue
+        certs.append((f"{log_id}:{start + offset}", hostnames, issuer))
+    probe_entries = tuple(
+        CTCertificate(
+            source_event_id=cert_id,
+            certificate=leaf_cert_envelope(hosts, issuer),
+            observed_at=datetime.now(UTC),
+        )
+        for cert_id, hosts, issuer in certs
+    )
+    probe_seen, _ = await poller.ingest_entries(probe_entries)
+    total_ingested = probe_seen
+    pages_done = 1
 
     async def worker() -> None:
         while spans:

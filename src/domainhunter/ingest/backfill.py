@@ -318,7 +318,7 @@ async def _ingest_log_window(
     every ~50 pages, so an interrupted run resumes cheaply.
     """
     probe_raw, _ = await fetcher.fetch_entries(log_id, start, min(start + 499, tree_size - 1))
-    stride = max(len(probe_raw), 1)
+    state = {"stride": max(len(probe_raw), 1)}
     probe_covered = start + len(probe_raw)
 
     spans: list[tuple[int, int]] = []
@@ -327,8 +327,8 @@ async def _ingest_log_window(
         spans.append((probe_covered, first_span_end))
     cursor_pos = first_span_end + 1
     while cursor_pos < tree_size:
-        spans.append((cursor_pos, min(cursor_pos + stride - 1, tree_size - 1)))
-        cursor_pos += stride
+        spans.append((cursor_pos, min(cursor_pos + state["stride"] - 1, tree_size - 1)))
+        cursor_pos += state["stride"]
 
     queue: asyncio.Queue[tuple[int, tuple[tuple[str, tuple[str, ...], str | None], int, int]] | None] = asyncio.Queue()
     pages_done = 1
@@ -361,7 +361,7 @@ async def _ingest_log_window(
                 raw, _ = await fetcher.fetch_entries(log_id, span_start, span_end)
             except Exception as error:  # noqa: BLE001 - a failed page is retried at the tail
                 _LOGGER.warning("backfill page fetch failed [%s:%s]: %s", span_start, span_end, error)
-                spans.append((span_start, span_end))
+                spans.insert(0, (span_start, span_end))
                 await asyncio.sleep(config.page_delay_seconds)
                 continue
             certs: list[tuple[str, tuple[str, ...], str | None]] = []
@@ -372,8 +372,11 @@ async def _ingest_log_window(
                 certs.append((f"{log_id}:{span_start + offset}", hostnames, issuer))
             await queue.put((span_start, (tuple(certs), span_start + len(raw), span_end)))
             if len(raw) < (span_end - span_start + 1):
-                # Server shorted this span — queue a repair range.
-                spans.append((span_start + len(raw), span_end))
+                # Server shorted this span — repair immediately (front of the
+                # queue) so the contiguous cursor pointer keeps advancing,
+                # and shrink the stride to the observed response size.
+                state["stride"] = min(state["stride"], max(len(raw), 1))
+                spans.insert(0, (span_start + len(raw), span_end))
 
     async def consumer() -> None:
         nonlocal total_ingested, pages_done, contiguous

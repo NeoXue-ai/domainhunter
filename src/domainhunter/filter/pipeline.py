@@ -23,6 +23,7 @@ from domainhunter.filter.rdap_age import (
     RegistrationCache,
     classify_age,
     fetch_registration,
+    rdap_base,
 )
 from domainhunter.filter.static_signals import DomainScore, score_domain
 
@@ -173,6 +174,12 @@ class FilterPipeline:
                 age_verdicts[domain] = AgeVerdict(
                     domain=domain, tier="unknown", age_days=None, reason="rdap_unavailable"
                 )
+            elif rdap_base(domain.rsplit(".", 1)[-1].lower()) is None:
+                # No RDAP endpoint exists for this TLD — that is permanent,
+                # not transient. Retrying forever would starve the queue.
+                age_verdicts[domain] = AgeVerdict(
+                    domain=domain, tier="unknown", age_days=None, reason="rdap_unsupported"
+                )
             else:
                 pending_rdap.append(domain)
 
@@ -236,8 +243,8 @@ class FilterPipeline:
                     FilterDecision(
                         domain=domain,
                         candidate=None,
-                        retryable=True,
-                        reason="rdap_unavailable",
+                        retryable=verdict.reason != "rdap_unsupported",
+                        reason=verdict.reason,
                     )
                 )
                 continue

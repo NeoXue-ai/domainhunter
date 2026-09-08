@@ -115,7 +115,7 @@ def test_filter_pipeline_parallel_rdap_matches_sequential() -> None:
             statuses=(),
         )
 
-    domains = [f"d{i}.example" for i in range(12)]
+    domains = [f"d{i}.com" for i in range(12)]
     pipeline = FilterPipeline(
         rdap_fetcher=slow_fetcher,
         dns_checker=lambda kept: {},

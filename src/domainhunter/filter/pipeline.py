@@ -76,6 +76,38 @@ def _probe_payload(probe: object) -> dict[str, object]:
     return {"probe": str(probe)}
 
 
+def _fetch_registrations_parallel(
+    domains: list[str], rdap_fetcher, concurrency: int
+) -> dict[str, object | None]:
+    """Fetch RDAP registrations with a bounded thread pool.
+
+    Each domain is independent, so results are merged back in the calling
+    thread — the cache is only touched serially, staying race-free.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    results: dict[str, object | None] = {}
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {domain: pool.submit(rdap_fetcher, domain) for domain in domains}
+        for domain, future in futures.items():
+            results[domain] = future.result()
+    return results
+
+
+def _check_dns_parallel(
+    domains: list[str], dns_checker, concurrency: int
+) -> dict[str, DnsResult]:
+    """Run the DNS checker one domain at a time across a bounded thread pool."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    merged: dict[str, DnsResult] = {}
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {domain: pool.submit(dns_checker, [domain]) for domain in domains}
+        for domain, future in futures.items():
+            merged.update(future.result())
+    return merged
+
+
 class FilterPipeline:
     """Run the S1→S2→S3 funnel over a batch of registrable domains."""
 
@@ -90,7 +122,11 @@ class FilterPipeline:
         rdap_fetcher=None,
         dns_checker=None,
         probe: ProbeCallable | None = None,
+        rdap_concurrency: int = 1,
+        dns_concurrency: int = 1,
     ) -> None:
+        if rdap_concurrency < 1 or dns_concurrency < 1:
+            raise ValueError("RDAP/DNS concurrency must be positive")
         self._cache = cache or MemoryCache()
         self._tier1_days = tier1_days
         self._tier2_days = tier2_days
@@ -99,6 +135,8 @@ class FilterPipeline:
         self._rdap_fetcher = rdap_fetcher or fetch_registration
         self._dns_checker = dns_checker or check_dns
         self._probe = probe
+        self._rdap_concurrency = rdap_concurrency
+        self._dns_concurrency = dns_concurrency
 
     def run(
         self, domains: list[str], *, observed_at: datetime | None = None
@@ -121,6 +159,7 @@ class FilterPipeline:
 
         # S2: RDAP age — only domains we haven't already classified this run.
         age_verdicts: dict[str, AgeVerdict] = {}
+        pending_rdap: list[str] = []
         for domain in domains:
             cached = self._cache.get(domain)
             if cached is not None:
@@ -135,7 +174,21 @@ class FilterPipeline:
                     domain=domain, tier="unknown", age_days=None, reason="rdap_unavailable"
                 )
             else:
-                reg = self._rdap_fetcher(domain)
+                pending_rdap.append(domain)
+
+        if pending_rdap:
+            if self._rdap_concurrency > 1:
+                registrations = _fetch_registrations_parallel(
+                    pending_rdap,
+                    self._rdap_fetcher,
+                    self._rdap_concurrency,
+                )
+            else:
+                registrations = {
+                    domain: self._rdap_fetcher(domain) for domain in pending_rdap
+                }
+            for domain in pending_rdap:
+                reg = registrations[domain]
                 if reg is not None:
                     self._cache.put(reg)
                 else:
@@ -158,7 +211,12 @@ class FilterPipeline:
         ]
         dns_results: dict[str, DnsResult] = {}
         if kept:
-            dns_results = self._dns_checker(kept)
+            if self._dns_concurrency > 1:
+                dns_results = _check_dns_parallel(
+                    kept, self._dns_checker, self._dns_concurrency
+                )
+            else:
+                dns_results = self._dns_checker(kept)
 
         decisions: list[FilterDecision] = []
         for domain in domains:

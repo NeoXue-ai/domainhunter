@@ -56,9 +56,23 @@ class CTPoller:
             cursor if cursor is not None else self._store.get_source_cursor(self.source_name)
         )
         page = await self._fetch_page(requested_cursor)
+        events_seen, events_added = await self.ingest_entries(page.entries)
+        self._store.set_source_cursor(self.source_name, page.next_cursor)
+        return CTPollResult(
+            next_cursor=page.next_cursor,
+            certificates_seen=len(page.entries),
+            events_seen=events_seen,
+            events_added=events_added,
+            source_errors=page.source_errors,
+        )
+
+    async def ingest_entries(
+        self, entries: tuple[CTCertificate, ...]
+    ) -> tuple[int, int]:
+        """Persist certificate entries idempotently; returns (seen, added)."""
         events_seen = 0
         events_added = 0
-        for entry in page.entries:
+        for entry in entries:
             events = build_ct_events(
                 entry.certificate,
                 entry.source_event_id,
@@ -68,11 +82,4 @@ class CTPoller:
             for event in events:
                 if self._store.append_source_event(event, hostname=event.raw_subject):
                     events_added += 1
-        self._store.set_source_cursor(self.source_name, page.next_cursor)
-        return CTPollResult(
-            next_cursor=page.next_cursor,
-            certificates_seen=len(page.entries),
-            events_seen=events_seen,
-            events_added=events_added,
-            source_errors=page.source_errors,
-        )
+        return events_seen, events_added

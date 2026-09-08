@@ -18,6 +18,7 @@ The orchestrator never reads back into the pipeline's mutable state; it just
 threads the live store through both layers.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -62,11 +63,14 @@ class CTIngestOrchestrator:
         probe_limit: int = 50,
         provider: LLMProvider | None = None,
         work_lease_seconds: float = 300.0,
+        probe_concurrency: int = 1,
     ) -> None:
         if probe_limit < 1:
             raise ValueError("probe_limit must be positive")
         if work_lease_seconds <= 0:
             raise ValueError("work_lease_seconds must be positive")
+        if probe_concurrency < 1:
+            raise ValueError("probe_concurrency must be positive")
         self._store = store
         self._poller = poller
         self._pipeline = pipeline
@@ -75,6 +79,7 @@ class CTIngestOrchestrator:
         self._probe_limit = probe_limit
         self._provider = provider
         self._work_lease_seconds = work_lease_seconds
+        self._probe_concurrency = probe_concurrency
 
     async def run_once(
         self, *, observed_at: datetime | None = None
@@ -149,96 +154,55 @@ class CTIngestOrchestrator:
         candidates_created = 0
         probes_run = 0
         llm_enriched = 0
-        for root in roots_to_probe:
+        counters = {"candidates": 0, "llm": 0}
+
+        if self._probe_concurrency > 1:
+            probe_outcomes = await self._probe_roots_parallel(
+                roots_to_probe, work_by_domain, stamp
+            )
+        else:
+            probe_outcomes = []
+            for root in roots_to_probe:
+                work = work_by_domain[root]
+                try:
+                    run = await self._pipeline.probe_domain(
+                        root,
+                        observed_at=stamp,
+                        require_same_final_root=(
+                            self._require_first_seen and self._filter_pipeline is not None
+                        ),
+                    )
+                except Exception as error:
+                    self._store.retry_ct_discovery_work(
+                        root,
+                        lease_token=work.lease_token,
+                        scheduled_at=stamp,
+                        error=str(error) or type(error).__name__,
+                    )
+                    raise
+                probe_outcomes.append((root, run, None))
+
+        for root, run, error in probe_outcomes:
             work = work_by_domain[root]
-            try:
-                run = await self._pipeline.probe_domain(
-                    root,
-                    observed_at=stamp,
-                    require_same_final_root=(
-                        self._require_first_seen and self._filter_pipeline is not None
-                    ),
-                )
-            except Exception as error:
+            if error is not None:
                 self._store.retry_ct_discovery_work(
                     root,
                     lease_token=work.lease_token,
                     scheduled_at=stamp,
-                    error=str(error) or type(error).__name__,
+                    error=error,
                 )
-                raise
+                continue
             probes_run += 1
-            if run.candidate_version is not None:
-                candidates_created += 1
-                filtered_candidate = filtered_by_domain.get(root)
-                if filtered_candidate is not None:
-                    self._append_verification(
-                        candidate_id=run.candidate_version.candidate_id,
-                        candidate_version=run.candidate_version.version,
-                        root=root,
-                        filtered_candidate=filtered_candidate,
-                        observed_at=stamp,
-                        status_code=run.observation.status_code,
-                        final_url=run.observation.final_url,
-                        canonical_url=run.observation.canonical_url,
-                    )
-                if self._provider is not None:
-                    try:
-                        draft = await enrich_candidate_with_llm(
-                            store=self._store,
-                            candidate_id=run.candidate_version.candidate_id,
-                            candidate_version=run.candidate_version.version,
-                            provider=self._provider,
-                            observed_at=stamp,
-                        )
-                    except Exception as error:  # noqa: BLE001 - preserve a successful strict discovery
-                        _LOGGER.exception(
-                            "ct_ingest.llm_enrichment.failed "
-                            "[domain=%s, candidate_id=%s, error=%s]",
-                            root,
-                            run.candidate_version.candidate_id,
-                            str(error) or type(error).__name__,
-                        )
-                        draft = None
-                    if draft is not None:
-                        llm_enriched += 1
-                        if filtered_candidate is not None:
-                            latest_version = self._store.list_candidate_versions(
-                                run.candidate_version.candidate_id
-                            )[-1]
-                            self._append_verification(
-                                candidate_id=latest_version.candidate_id,
-                                candidate_version=latest_version.version,
-                                root=root,
-                                filtered_candidate=filtered_candidate,
-                                observed_at=stamp,
-                                status_code=run.observation.status_code,
-                                final_url=run.observation.final_url,
-                                canonical_url=run.observation.canonical_url,
-                            )
-                self._store.complete_ct_discovery_domain(
-                    root,
-                    lease_token=work.lease_token,
-                    at=stamp,
-                    reason="candidate_created",
-                )
-            elif run.probe_result.analysis is not None:
-                self._store.complete_ct_discovery_domain(
-                    root,
-                    lease_token=work.lease_token,
-                    at=stamp,
-                    reason="not_a_candidate",
-                )
-            else:
-                self._store.retry_ct_discovery_work(
-                    root,
-                    lease_token=work.lease_token,
-                    scheduled_at=(
-                        run.retry_decision.next_check_at
-                        or stamp + timedelta(minutes=5)
-                    ),
-                    error=run.observation.outcome_code.value,
-                )
+            await self._handle_probe_result(
+                root=root,
+                work=work,
+                run=run,
+                stamp=stamp,
+                filtered_by_domain=filtered_by_domain,
+                counters=counters,
+            )
+        candidates_created = counters["candidates"]
+        llm_enriched = counters["llm"]
         return CTIngestRunSummary(
             certificates_seen=poll_result.certificates_seen,
             events_added=poll_result.events_added,
@@ -251,6 +215,119 @@ class CTIngestOrchestrator:
             source_errors=poll_result.source_errors,
             pending_work=self._store.pending_ct_discovery_work_count(),
         )
+
+    async def _probe_roots_parallel(
+        self,
+        roots_to_probe: list[str],
+        work_by_domain: dict[str, object],
+        stamp: datetime,
+    ) -> list[tuple[str, object, str | None]]:
+        """Probe roots with bounded concurrency; failures become work retries.
+
+        Returns ``(root, ProbeRun | None, error | None)`` tuples in input
+        order. Unlike the sequential path, a probe exception does not abort
+        the round — backfill batches are large and one bad site must not
+        discard hundreds of completed probes.
+        """
+        semaphore = asyncio.Semaphore(self._probe_concurrency)
+
+        async def _one(root: str) -> tuple[str, object, str | None]:
+            async with semaphore:
+                try:
+                    run = await self._pipeline.probe_domain(
+                        root,
+                        observed_at=stamp,
+                        require_same_final_root=(
+                            self._require_first_seen and self._filter_pipeline is not None
+                        ),
+                    )
+                except Exception as error:  # noqa: BLE001 - isolate per-site failures
+                    return (root, None, str(error) or type(error).__name__)
+                return (root, run, None)
+
+        return list(await asyncio.gather(*(_one(root) for root in roots_to_probe)))
+
+    async def _handle_probe_result(
+        self,
+        *,
+        root: str,
+        work: object,
+        run: object,
+        stamp: datetime,
+        filtered_by_domain: dict[str, FilteredCandidate],
+        counters: dict[str, int],
+    ) -> None:
+        """Apply one successful probe: candidate creation, enrichment, completion."""
+        if run.candidate_version is not None:
+            counters["candidates"] += 1
+            filtered_candidate = filtered_by_domain.get(root)
+            if filtered_candidate is not None:
+                self._append_verification(
+                    candidate_id=run.candidate_version.candidate_id,
+                    candidate_version=run.candidate_version.version,
+                    root=root,
+                    filtered_candidate=filtered_candidate,
+                    observed_at=stamp,
+                    status_code=run.observation.status_code,
+                    final_url=run.observation.final_url,
+                    canonical_url=run.observation.canonical_url,
+                )
+            if self._provider is not None:
+                try:
+                    draft = await enrich_candidate_with_llm(
+                        store=self._store,
+                        candidate_id=run.candidate_version.candidate_id,
+                        candidate_version=run.candidate_version.version,
+                        provider=self._provider,
+                        observed_at=stamp,
+                    )
+                except Exception as error:  # noqa: BLE001 - preserve a successful strict discovery
+                    _LOGGER.exception(
+                        "ct_ingest.llm_enrichment.failed "
+                        "[domain=%s, candidate_id=%s, error=%s]",
+                        root,
+                        run.candidate_version.candidate_id,
+                        str(error) or type(error).__name__,
+                    )
+                    draft = None
+                if draft is not None:
+                    counters["llm"] += 1
+                    if filtered_candidate is not None:
+                        latest_version = self._store.list_candidate_versions(
+                            run.candidate_version.candidate_id
+                        )[-1]
+                        self._append_verification(
+                            candidate_id=latest_version.candidate_id,
+                            candidate_version=latest_version.version,
+                            root=root,
+                            filtered_candidate=filtered_candidate,
+                            observed_at=stamp,
+                            status_code=run.observation.status_code,
+                            final_url=run.observation.final_url,
+                            canonical_url=run.observation.canonical_url,
+                        )
+            self._store.complete_ct_discovery_domain(
+                root,
+                lease_token=work.lease_token,
+                at=stamp,
+                reason="candidate_created",
+            )
+        elif run.probe_result.analysis is not None:
+            self._store.complete_ct_discovery_domain(
+                root,
+                lease_token=work.lease_token,
+                at=stamp,
+                reason="not_a_candidate",
+            )
+        else:
+            self._store.retry_ct_discovery_work(
+                root,
+                lease_token=work.lease_token,
+                scheduled_at=(
+                    run.retry_decision.next_check_at or stamp + timedelta(minutes=5)
+                ),
+                error=run.observation.outcome_code.value,
+            )
 
     def _append_verification(
         self,

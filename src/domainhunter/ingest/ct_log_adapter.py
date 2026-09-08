@@ -126,6 +126,34 @@ def _cert_hostnames(cert: x509.Certificate) -> tuple[str, ...]:
     return tuple(hostnames)
 
 
+def _parse_leaf_cert(leaf_input_b64: str) -> x509.Certificate | None:
+    """Decode one RFC 6962 ``leaf_input`` into a certificate (or None)."""
+    try:
+        data = base64.b64decode(leaf_input_b64)
+    except (ValueError, TypeError):
+        return None
+    if len(data) < 12:
+        return None
+
+    version, leaf_type = data[0], data[1]
+    if version != 0 or leaf_type != 0:
+        return None
+    entry_type = struct.unpack(">H", data[10:12])[0]
+    payload = data[12:]
+
+    try:
+        if entry_type == 0:
+            cert_len = struct.unpack(">I", b"\x00" + payload[:3])[0]
+            return x509.load_der_x509_certificate(payload[3 : 3 + cert_len])
+        if entry_type == 1:
+            tbs_len = struct.unpack(">I", b"\x00" + payload[32:35])[0]
+            tbs_der = payload[35 : 35 + tbs_len]
+            return x509.load_der_x509_certificate(wrap_tbs_as_certificate(tbs_der))
+    except (ValueError, struct.error):
+        return None
+    return None
+
+
 def parse_leaf_input(leaf_input_b64: str) -> tuple[tuple[str, ...], str | None]:
     """Decode one RFC 6962 ``leaf_input`` and return (hostnames, issuer CN|O) or empty.
 
@@ -133,32 +161,7 @@ def parse_leaf_input(leaf_input_b64: str) -> tuple[tuple[str, ...], str | None]:
     directly; precert entries have their TBS wrapped back into a
     certificate so CN and SAN can be read uniformly.
     """
-    try:
-        data = base64.b64decode(leaf_input_b64)
-    except (ValueError, TypeError):
-        return (), None
-    if len(data) < 12:
-        return (), None
-
-    version, leaf_type = data[0], data[1]
-    if version != 0 or leaf_type != 0:
-        return (), None
-    entry_type = struct.unpack(">H", data[10:12])[0]
-    payload = data[12:]
-
-    cert: x509.Certificate | None = None
-    try:
-        if entry_type == 0:
-            cert_len = struct.unpack(">I", b"\x00" + payload[:3])[0]
-            cert_der = payload[3 : 3 + cert_len]
-            cert = x509.load_der_x509_certificate(cert_der)
-        elif entry_type == 1:
-            tbs_len = struct.unpack(">I", b"\x00" + payload[32:35])[0]
-            tbs_der = payload[35 : 35 + tbs_len]
-            cert = x509.load_der_x509_certificate(wrap_tbs_as_certificate(tbs_der))
-    except (ValueError, struct.error):
-        return (), None
-
+    cert = _parse_leaf_cert(leaf_input_b64)
     if cert is None:
         return (), None
 
@@ -179,7 +182,31 @@ def parse_leaf_input(leaf_input_b64: str) -> tuple[tuple[str, ...], str | None]:
     return _cert_hostnames(cert), issuer
 
 
-def _to_leaf_cert_envelope(hostnames: tuple[str, ...], issuer: str | None) -> Mapping[str, Any]:
+def parse_leaf_timestamp(leaf_input_b64: str) -> datetime | None:
+    """Return the leaf's log-submission timestamp (UTC) or None if unparseable.
+
+    RFC 6962 v1 MerkleTreeLeaf: ``version(1) + leaf_type(1) + timestamp(8, ms)``.
+    The log assigns this when it accepts the entry, so it is monotonically
+    non-decreasing with tree index — the only reliable time axis for
+    backfill range selection. (Certificate ``notBefore`` is NOT usable:
+    CAs backdate and batch-issue, so it is wildly non-monotonic.)
+    """
+    try:
+        data = base64.b64decode(leaf_input_b64)
+    except (ValueError, TypeError):
+        return None
+    if len(data) < 12:
+        return None
+    version, leaf_type = data[0], data[1]
+    if version != 0 or leaf_type != 0:
+        return None
+    timestamp_ms = struct.unpack(">Q", data[2:10])[0]
+    if timestamp_ms <= 0:
+        return None
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
+
+
+def leaf_cert_envelope(hostnames: tuple[str, ...], issuer: str | None) -> Mapping[str, Any]:
     """Normalize parsed hosts into the ``leaf_cert`` shape ``build_ct_events`` expects."""
     leaf_cert: dict[str, Any] = {"all_domains": list(hostnames)}
     if hostnames:
@@ -277,6 +304,11 @@ class CTLogFetcher:
         start = last
         end = min(start + self._page_size - 1, tree_size - 1)
         entries = await self._get_entries(log, start, end)
+        # RFC 6962 allows servers to return FEWER entries than requested
+        # (Nimbus caps at ~50-150). The cursor must advance by the number
+        # of entries actually returned — advancing to ``end + 1`` would
+        # silently skip every truncated entry.
+        state[log.log_id] = min(start + len(entries), tree_size)
         certificates: list[CTCertificate] = []
         for index, entry in enumerate(entries):
             leaf_input = entry.get("leaf_input", "")
@@ -286,12 +318,41 @@ class CTLogFetcher:
             certificates.append(
                 CTCertificate(
                     source_event_id=f"{log.log_id}:{start + index}",
-                    certificate=_to_leaf_cert_envelope(hostnames, issuer),
+                    certificate=leaf_cert_envelope(hostnames, issuer),
                     observed_at=self._clock(),
                 )
             )
-        state[log.log_id] = min(end + 1, tree_size)
         return certificates
+
+    @property
+    def logs(self) -> tuple[CTLogTarget, ...]:
+        """The configured CT log targets, in polling order."""
+        return self._logs
+
+    async def fetch_entries(
+        self, log_id: str, start: int, end: int
+    ) -> tuple[list[dict[str, Any]], CTLogTarget]:
+        """Fetch a raw entry range for one log (backfill's range-based page API)."""
+        for log in self._logs:
+            if log.log_id == log_id:
+                if end < start:
+                    raise ValueError("end must be >= start")
+                return await self._get_entries(log, start, end), log
+        raise ValueError(f"unknown log_id {log_id!r}")
+
+    async def tree_sizes(self) -> dict[str, int]:
+        """Return the current tree size of every configured log."""
+        return {log.log_id: await self._get_sth(log) for log in self._logs}
+
+    async def leaf_timestamp(self, log_id: str, index: int) -> datetime | None:
+        """Fetch one entry and return its certificate ``notBefore`` (UTC)."""
+        for log in self._logs:
+            if log.log_id == log_id:
+                entries = await self._get_entries(log, index, index)
+                if not entries:
+                    return None
+                return parse_leaf_timestamp(entries[0].get("leaf_input", ""))
+        raise ValueError(f"unknown log_id {log_id!r}")
 
     async def _get_sth(self, log: CTLogTarget) -> int:
         payload = await self._request(log, "/ct/v1/get-sth")

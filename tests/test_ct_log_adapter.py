@@ -130,6 +130,56 @@ def test_fetcher_returns_new_entries_and_advances_cursor() -> None:
     asyncio.run(run())
 
 
+def test_fetcher_cursor_survives_server_truncation() -> None:
+    """A server may return fewer entries than requested (RFC 6962 allows it).
+
+    The cursor must advance by the number of entries actually returned,
+    never by the requested range — otherwise truncated entries are
+    silently skipped forever.
+    """
+    leaf = _x509_leaf_input(_make_cert())
+    returned_per_page = {"count": 2}
+
+    def truncating_handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("get-sth"):
+            return httpx.Response(200, json={"tree_size": 10_000})
+        start = int(httpx.QueryParams(request.url.query)["start"])
+        count = min(returned_per_page["count"], 10_000 - start)
+        return httpx.Response(
+            200, json={"entries": [{"leaf_input": leaf} for _ in range(count)]}
+        )
+
+    fetcher = CTLogFetcher(
+        logs=(_log(),),
+        transport=httpx.MockTransport(truncating_handler),
+        catchup_entries=10,
+        max_entries_per_page=500,
+        sleep=lambda _: None,
+    )
+
+    import asyncio
+
+    async def run() -> None:
+        first = await fetcher(None)
+        # Requested 10 (catchup), server returned only 2.
+        assert len(first.entries) == 2
+        assert {e.source_event_id for e in first.entries} == {
+            "test:9990",
+            "test:9991",
+        }
+        assert _parse_cursors(first.next_cursor) == {"test": 9992}
+
+        # Next page continues right after what was actually returned.
+        second = await fetcher(first.next_cursor)
+        assert {e.source_event_id for e in second.entries} == {
+            "test:9992",
+            "test:9993",
+        }
+
+    asyncio.run(run())
+
+
 def test_fetcher_catchup_pulls_only_the_tail() -> None:
     leaf = _x509_leaf_input(_make_cert())
     transport = httpx.MockTransport(_handler(2000, leaf))

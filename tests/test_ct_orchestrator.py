@@ -741,3 +741,64 @@ def test_empty_page_returns_zero_summary(tmp_path) -> None:
         assert summary.candidates_created == 0
 
     _run(go())
+
+
+class _SelectiveFailingProbe:
+    """Raises for configured hostnames; canned analyses for the rest."""
+
+    def __init__(self, responses: dict[str, L1Analysis], failing: set[str]) -> None:
+        self._responses = responses
+        self._failing = failing
+
+    async def probe(self, hostname: str) -> ProbeResult:
+        if hostname in self._failing:
+            raise RuntimeError(f"boom for {hostname}")
+        analysis = self._responses.get(hostname)
+        if analysis is None:
+            return ProbeResult(
+                outcome_code=OutcomeCode.DNS_NOT_FOUND,
+                final_url=None,
+                analysis=None,
+                detail="no canned response",
+            )
+        return ProbeResult(
+            outcome_code=analysis.outcome_code,
+            final_url=analysis.final_url,
+            analysis=analysis,
+        )
+
+
+def test_probe_concurrency_isolates_failures(tmp_path) -> None:
+    """Parallel probing must not abort the round when one site explodes."""
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    hosts = ("alpha-ai.com", "beta-ai.com", "gamma-ai.com", "delta-ai.com", "boom-ai.com")
+    page = CTPage(
+        entries=tuple(_cert(f"c{i}", host) for i, host in enumerate(hosts)),
+        next_cursor="done",
+    )
+    poller = _make_poller(store, (page,))
+    responses = {
+        "alpha-ai.com": _ai_publishable("alpha-ai.com"),
+        "beta-ai.com": _ai_publishable("beta-ai.com"),
+        "gamma-ai.com": _empty_success("gamma-ai.com"),
+        "delta-ai.com": _ai_publishable("delta-ai.com"),
+    }
+    probe = _SelectiveFailingProbe(responses, failing={"boom-ai.com"})
+    pipeline = DomainHunterPipeline(store=store, probe=probe)  # type: ignore[arg-type]
+    orchestrator = CTIngestOrchestrator(
+        store=store,
+        poller=poller,
+        pipeline=pipeline,
+        probe_limit=10,
+        probe_concurrency=4,
+    )
+
+    async def go() -> CTIngestRunSummary:
+        return await orchestrator.run_once(observed_at=_OBSERVED)
+
+    summary = _run(go())
+    assert summary.probes_run == 4  # the exploding one never produced a run
+    assert summary.candidates_created == 3
+    assert summary.pending_work == 1  # boom-ai.com was retried, still pending
+    queue_domains = {item.candidate.domain for item in store.list_review_queue()}
+    assert queue_domains == {"alpha-ai.com", "beta-ai.com", "delta-ai.com"}

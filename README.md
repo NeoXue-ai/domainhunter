@@ -102,6 +102,30 @@ then approve, defer, reject, or blocklist. Actions require an
 `X-Actor-ID` and are recorded in SQLite. "扫描新网站" triggers one
 strict CT pass via `POST /v1/run/discovery`.
 
+### Backfill: replay a past window
+
+Realtime discovery only sees what arrives while it runs. To cover a gap
+(or bootstrap a fresh database), replay a past window through the same
+funnel:
+
+```bash
+domainhunter backfill --database ./domainhunter.db --hours 6
+```
+
+The start index is located by binary search on the log's own submission
+timestamps (monotonic with tree index), pages are fetched with bounded
+parallelism, and everything flows into the ordinary first-seen baseline
++ work queue — interrupted runs resume from the stored cursor.
+
+Reality check for capacity planning: a busy log like Cloudflare Nimbus
+2026 receives roughly **1M entries per hour**. A 1h backfill ingests in
+~10-20 minutes; a 24h window is ~20M entries and will take most of a
+day just to ingest. Prefer 1-6h windows, or run backfill repeatedly —
+each run resumes where the last one stopped. Digest (RDAP + probing)
+adds hours on top and is bounded by RDAP servers' rate limits; the
+concurrency knobs (`--rdap-concurrency`, `--probe-concurrency`,
+`--page-fetch-concurrency`) trade speed against politeness.
+
 ## HTTP API
 
 Loopback-only unless `--host 0.0.0.0`. The API has **no authentication** —

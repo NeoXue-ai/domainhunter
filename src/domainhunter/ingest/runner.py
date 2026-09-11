@@ -1,19 +1,17 @@
-"""Manual backfill: replay a past time window of CT log entries.
+"""Continuous CT discovery runner for ``domainhunter start``.
 
-Realtime discovery only sees what arrives while the daemon runs.  This
-module replays an arbitrary past window (``--hours N``) through the
-exact same funnel:
+One command, started once, runs at capacity until Ctrl-C:
 
-1. **Locate** the start index per log via binary search on the leaf
-   certificate's ``notBefore`` (CT logs carry no time index; issuance
-   order tracks submission order closely enough for day granularity).
-2. **Ingest**: pull every page from the start index to the tree head
-   back-to-back through the ordinary ``CTPoller`` — idempotent events,
-   first-seen baseline, and one ``ct_discovery_work`` item per new root.
-   At ~500 entries/page a 24h window (~350k entries) takes minutes.
-3. **Digest**: run orchestrator rounds until the work queue drains.
-   Bounded concurrency knobs keep the fan-out polite: RDAP servers
-   rate-limit aggressively, and HTTP probes are capped per host.
+1. **Sweep**: pull every page from the stored cursor to the tree head
+   with bounded parallelism (servers truncate pages, so the stride is
+   discovered from real responses and shortfalls are repaired in place).
+   Idempotent events, first-seen baseline and one work item per new root.
+2. **Digest**: run funnel rounds (RDAP age, DNS, HTTP probe, optional
+   LLM) until the work queue drains, then pause ``--idle-seconds`` and
+   sweep again.  A fresh database starts at the tree head; ``--entries``
+   or ``--hours`` can seed a one-time historical window on first run.
+3. **Resume**: the cursor is checkpointed every ~50 pages, so a killed
+   run continues where it stopped instead of rescanning.
 """
 
 from __future__ import annotations
@@ -34,15 +32,17 @@ from domainhunter.ingest.ct_log_adapter import (
 from domainhunter.ingest.ct_poller import CTCertificate, CTPoller
 from domainhunter.storage.sqlite import SQLiteStore
 
-_LOGGER = logging.getLogger("domainhunter.backfill")
+_LOGGER = logging.getLogger("domainhunter.start")
 
 
 @dataclass(frozen=True, slots=True)
-class BackfillConfig:
+class StartConfig:
     """Knobs for one backfill run. All bounded on purpose."""
 
     hours: float | None = None
     entries: int | None = None
+    follow: bool = True
+    idle_seconds: float = 15.0
     page_delay_seconds: float = 0.25
     claim_limit: int = 400
     round_delay_seconds: float = 10.0
@@ -57,8 +57,8 @@ class BackfillConfig:
             raise ValueError("hours must be positive")
         if self.entries is not None and self.entries <= 0:
             raise ValueError("entries must be positive")
-        if (self.hours is None) == (self.entries is None):
-            raise ValueError("provide exactly one of --hours or --entries")
+        if self.hours is not None and self.entries is not None:
+            raise ValueError("choose at most one of hours/entries")
         if self.page_delay_seconds < 0:
             raise ValueError("page_delay_seconds must be non-negative")
         if self.claim_limit < 1:
@@ -67,6 +67,8 @@ class BackfillConfig:
             raise ValueError("round_delay_seconds must be non-negative")
         if self.page_fetch_concurrency < 1:
             raise ValueError("page_fetch_concurrency must be positive")
+        if self.follow and self.idle_seconds < 0:
+            raise ValueError("idle_seconds must be non-negative")
         if min(
             self.rdap_concurrency, self.dns_concurrency, self.probe_concurrency
         ) < 1:
@@ -74,7 +76,7 @@ class BackfillConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class BackfillSummary:
+class StartSummary:
     """Counts observable at the end of one backfill run."""
 
     ingested_entries: int
@@ -140,15 +142,15 @@ async def locate_start_index(
     return max(0, min(answer, tree_size))
 
 
-async def run_backfill(
+async def run_start(
     *,
     store: SQLiteStore,
     fetcher: CTLogFetcher,
     poller: CTPoller,
     digest_once,
-    config: BackfillConfig,
+    config: StartConfig,
     progress=None,
-) -> BackfillSummary:
+) -> StartSummary:
     """Run one backfill: rewind, ingest the window, then digest the queue.
 
     Ingest fetches pages with bounded concurrency (servers cap page sizes,
@@ -158,6 +160,15 @@ async def run_backfill(
     ``digest_once()`` must run one orchestrator round.
     """
     report = progress or (lambda event: _LOGGER.info("%s", event))
+    if config.follow:
+        return await _run_follow(
+            store=store,
+            fetcher=fetcher,
+            poller=poller,
+            digest_once=digest_once,
+            config=config,
+            progress=report,
+        )
     since = (
         datetime.now(UTC) - timedelta(hours=config.hours)
         if config.hours is not None
@@ -181,7 +192,7 @@ async def run_backfill(
             if located >= tree_sizes[target.log_id]:
                 report(
                     {
-                        "event": "backfill.window_empty",
+                        "event": "start.window_empty",
                         "log": target.log_id,
                         "hint": (
                             "the log tail lags its public STH by tens of minutes; "
@@ -198,7 +209,7 @@ async def run_backfill(
         resume_indices[target.log_id] = resume
         report(
             {
-                "event": "backfill.located_start",
+                "event": "start.located_start",
                 "log": target.log_id,
                 "tree_size": tree_sizes[target.log_id],
                 "start_index": located,
@@ -216,7 +227,7 @@ async def run_backfill(
         config=config,
         progress=report,
     )
-    report({"event": "backfill.ingest_done", "ingested": ingested, "pending_work": queued_before})
+    report({"event": "start.ingest_done", "ingested": ingested, "pending_work": queued_before})
     rounds = 0
     probes_run = 0
     candidates_created = 0
@@ -228,7 +239,7 @@ async def run_backfill(
         pending = store.pending_ct_discovery_work_count()
         report(
             {
-                "event": "backfill.digest_round",
+                "event": "start.digest_round",
                 "round": rounds,
                 "probes": summary.probes_run,
                 "candidates": summary.candidates_created,
@@ -238,11 +249,11 @@ async def run_backfill(
         if pending == 0:
             break
         if config.max_rounds is not None and rounds >= config.max_rounds:
-            report({"event": "backfill.round_budget_exhausted", "rounds": rounds})
+            report({"event": "start.round_budget_exhausted", "rounds": rounds})
             break
         await asyncio.sleep(config.round_delay_seconds)
 
-    return BackfillSummary(
+    return StartSummary(
         ingested_entries=ingested,
         queued_domains=queued_before,
         probes_run=probes_run,
@@ -251,6 +262,99 @@ async def run_backfill(
         pending_work=store.pending_ct_discovery_work_count(),
         start_indices=start_indices,
     )
+
+
+async def _run_follow(
+    *,
+    store: SQLiteStore,
+    fetcher: CTLogFetcher,
+    poller: CTPoller,
+    digest_once,
+    config: StartConfig,
+    progress,
+) -> StartSummary:
+    """Continuous max-speed mode: sweep cursor→head, drain the queue, repeat.
+
+    This is ``discover`` with backfill's parallel ingest: started once, it
+    keeps catching up new entries and digesting candidates until Ctrl-C.
+    An empty store starts at the current tree head (future-only); a stored
+    cursor resumes wherever the last run stopped.
+    """
+    cycle = 0
+    total_ingested = 0
+    total_probes = 0
+    total_candidates = 0
+    total_rounds = 0
+    first_cycle = True
+    since = (
+        datetime.now(UTC) - timedelta(hours=config.hours)
+        if config.hours is not None
+        else None
+    )
+    while True:
+        cycle += 1
+        stored = _parse_stored_cursor(store.get_source_cursor(poller.source_name))
+        tree_sizes = await fetcher.tree_sizes()
+        resume_indices: dict[str, int] = {}
+        for target in fetcher.logs:
+            log_id = target.log_id
+            cursor = stored.get(log_id)
+            if cursor is not None:
+                resume_indices[log_id] = cursor
+            elif first_cycle and config.entries is not None:
+                resume_indices[log_id] = max(0, tree_sizes[log_id] - config.entries)
+            elif first_cycle and since is not None:
+                located = await locate_start_index(
+                    fetcher, log_id=log_id, since=since, tree_size=tree_sizes[log_id]
+                )
+                resume_indices[log_id] = min(located, tree_sizes[log_id])
+                if located >= tree_sizes[log_id]:
+                    progress({
+                        "event": "start.window_empty",
+                        "log": log_id,
+                        "hint": "log tail lags its public STH; use --entries N for a count-based first window",
+                    })
+            else:
+                resume_indices[log_id] = tree_sizes[log_id]
+        first_cycle = False
+        ingested, queued = await _ingest_window(
+            store=store,
+            fetcher=fetcher,
+            poller=poller,
+            resume_indices=resume_indices,
+            tree_sizes=tree_sizes,
+            config=config,
+            progress=progress,
+        )
+        total_ingested += ingested
+
+        rounds = 0
+        while True:
+            summary = await digest_once()
+            rounds += 1
+            total_rounds += 1
+            total_probes += summary.probes_run
+            total_candidates += summary.candidates_created
+            pending = store.pending_ct_discovery_work_count()
+            if config.max_rounds is not None and rounds >= config.max_rounds:
+                break
+            if pending == 0:
+                break
+            await asyncio.sleep(config.round_delay_seconds)
+        progress(
+            {
+                "event": "start.cycle",
+                "cycle": cycle,
+                "cycle_ingested": ingested,
+                "cycle_digest_rounds": rounds,
+                "cycle_candidates": summary.candidates_created,
+                "queued_domains": queued,
+                "pending_work": store.pending_ct_discovery_work_count(),
+                "total_ingested": total_ingested,
+                "total_candidates": total_candidates,
+            }
+        )
+        await asyncio.sleep(config.idle_seconds)
 
 
 def _parse_stored_cursor(cursor: str | None) -> dict[str, int]:
@@ -272,7 +376,7 @@ async def _ingest_window(
     poller: CTPoller,
     resume_indices: dict[str, int],
     tree_sizes: dict[str, int],
-    config: BackfillConfig,
+    config: StartConfig,
     progress,
 ) -> tuple[int, int]:
     """Ingest [resume_index, tree_size) for every log with bounded parallelism."""
@@ -306,7 +410,7 @@ async def _ingest_log_window(
     log_id: str,
     start: int,
     tree_size: int,
-    config: BackfillConfig,
+    config: StartConfig,
     progress,
 ) -> int:
     """One log's window: parallel fixed-stride page sweep, truncation-aware.
@@ -403,7 +507,7 @@ async def _ingest_log_window(
                 store.set_source_cursor(poller.source_name, json.dumps({log_id: contiguous}))
                 progress(
                     {
-                        "event": "backfill.ingest_progress",
+                        "event": "start.ingest_progress",
                         "log": log_id,
                         "pages": pages_done,
                         "entries": total_ingested,
@@ -422,17 +526,3 @@ async def _ingest_log_window(
     await consumer_task
     store.set_source_cursor(poller.source_name, json.dumps({log_id: tree_size}))
     return total_ingested
-
-
-def build_backfill_config(args: Any) -> BackfillConfig:
-    """Build a BackfillConfig from parsed CLI arguments."""
-    return BackfillConfig(
-        hours=args.hours,
-        page_delay_seconds=args.page_delay,
-        claim_limit=args.claim_limit,
-        round_delay_seconds=args.round_delay,
-        rdap_concurrency=args.rdap_concurrency,
-        dns_concurrency=args.dns_concurrency,
-        probe_concurrency=args.probe_concurrency,
-        max_rounds=args.max_rounds,
-    )

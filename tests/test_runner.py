@@ -8,7 +8,7 @@ import pytest
 
 from domainhunter.filter.pipeline import FilterPipeline
 from domainhunter.filter.rdap_age import Registration
-from domainhunter.ingest.backfill import BackfillConfig, locate_start_index
+from domainhunter.ingest.runner import StartConfig, locate_start_index
 
 
 class _FakeTimestampFetcher:
@@ -82,13 +82,13 @@ def test_locate_start_index_survives_unparseable_entries() -> None:
     assert result == 30
 
 
-def test_backfill_config_rejects_bad_knobs() -> None:
+def test_start_config_rejects_bad_knobs() -> None:
     with pytest.raises(ValueError):
-        BackfillConfig(hours=0)
+        StartConfig(hours=0)
     with pytest.raises(ValueError):
-        BackfillConfig(hours=1, probe_concurrency=0)
+        StartConfig(hours=1, probe_concurrency=0)
     with pytest.raises(ValueError):
-        BackfillConfig(hours=1, claim_limit=-1)
+        StartConfig(hours=1, claim_limit=-1)
 
 
 def test_filter_pipeline_parallel_rdap_matches_sequential() -> None:

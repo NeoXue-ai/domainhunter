@@ -61,17 +61,17 @@ There are four:
 ```bash
 domainhunter init --database ./domainhunter.db        # create/open the DB
 
-domainhunter discover --database ./domainhunter.db    # background discovery
+domainhunter start    --database ./domainhunter.db    # continuous discovery
 domainhunter serve  --database ./domainhunter.db      # review inbox UI
 domainhunter status --database ./domainhunter.db      # known + due domains
 ```
 
-### Background discovery
+### Continuous discovery
 
 ```bash
-domainhunter discover \
+domainhunter start \
   --database ./domainhunter.db \
-  --round-seconds 120 \
+  --entries 500000 \
   --provider openai-compatible --base-url "https://api.deepseek.com" \
   --token-env DEEPSEEK_TOKEN --model "deepseek-chat"
 ```
@@ -102,29 +102,22 @@ then approve, defer, reject, or blocklist. Actions require an
 `X-Actor-ID` and are recorded in SQLite. "扫描新网站" triggers one
 strict CT pass via `POST /v1/run/discovery`.
 
-### Backfill: replay a past window
+### How `start` behaves
 
-Realtime discovery only sees what arrives while it runs. To cover a gap
-(or bootstrap a fresh database), replay a past window through the same
-funnel:
+`start` sweeps every new CT entry to the tree head with bounded
+parallelism, digests the funnel queue, then idles and repeats — one
+command, maximum speed, until Ctrl-C. A fresh database begins at the
+current tree head; pass `--entries 500000` (or `--hours 6`) to seed a
+one-time historical window first. Interrupted runs resume from the
+stored cursor; failures are retried automatically by the work queue.
 
-```bash
-domainhunter backfill --database ./domainhunter.db --hours 6
-```
-
-The start index is located by binary search on the log's own submission
-timestamps (monotonic with tree index), pages are fetched with bounded
-parallelism, and everything flows into the ordinary first-seen baseline
-+ work queue — interrupted runs resume from the stored cursor.
-
-Reality check for capacity planning: a busy log like Cloudflare Nimbus
-2026 receives roughly **1M entries per hour**. A 1h backfill ingests in
-~10-20 minutes; a 24h window is ~20M entries and will take most of a
-day just to ingest. Prefer 1-6h windows, or run backfill repeatedly —
-each run resumes where the last one stopped. Digest (RDAP + probing)
-adds hours on top and is bounded by RDAP servers' rate limits; the
-concurrency knobs (`--rdap-concurrency`, `--probe-concurrency`,
-`--page-fetch-concurrency`) trade speed against politeness.
+Capacity note: a busy log like Cloudflare Nimbus 2026 receives roughly
+**1M entries per hour**, so `--entries` on the order of 10^5 keeps the
+first sweep under an hour. Digest throughput is bounded by RDAP servers'
+rate limits; the concurrency knobs (`--rdap-concurrency`,
+`--dns-concurrency`, `--probe-concurrency`, `--page-fetch-concurrency`)
+trade speed against politeness, and `--filter-retry-delay` controls how
+fast failed DNS/RDAP checks come back for another try.
 
 ## HTTP API
 
@@ -157,7 +150,7 @@ where it stopped and never re-scans.
 After=network-online.target
 
 [Service]
-ExecStart=/opt/domainhunter/.venv/bin/domainhunter discover --database /var/lib/domainhunter/dh.db
+ExecStart=/opt/domainhunter/.venv/bin/domainhunter start --database /var/lib/domainhunter/dh.db
 Restart=always
 RestartSec=10
 
@@ -185,14 +178,14 @@ required):
   <key>Label</key><string>ai.neoxue.domainhunter</string>
   <key>ProgramArguments</key><array>
     <string>/Users/YOU/domainhunter/.venv/bin/domainhunter</string>
-    <string>discover</string>
+    <string>start</string>
     <string>--database</string>
     <string>/Users/YOU/domainhunter/dh.db</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/YOU/domainhunter/discover.log</string>
-  <key>StandardErrorPath</key><string>/Users/YOU/domainhunter/discover.err.log</string>
+  <key>StandardOutPath</key><string>/Users/YOU/domainhunter/start.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/domainhunter/start.err.log</string>
 </dict></plist>
 ```
 
@@ -208,7 +201,7 @@ auto-sleep if you need true 24h coverage.
 
 ```bat
 schtasks /Create /TN DomainHunter /SC ONSTART /RU SYSTEM ^
-  /TR "C:\domainhunter\.venv\Scripts\domainhunter.exe discover --database C:\domainhunter\db\dh.db"
+  /TR "C:\domainhunter\.venv\Scripts\domainhunter.exe start --database C:\domainhunter\db\dh.db"
 ```
 
 For restart-on-failure, open `taskschd.msc` and set "restart on failure" in
@@ -221,13 +214,12 @@ as the switch.
 ```
 src/domainhunter/
   api.py        — FastAPI routes
-  cli.py        — `domainhunter` entry point (init/status/discover/serve)
+  cli.py        — `domainhunter` entry point (init/status/start/serve)
   pipeline.py   — S4 probe + retry policy + candidate creation
   crawler/      — HTTP probe, L1 content analysis, SSRF-safe transport
   filter/       — S1 static signals, S2 RDAP age, S3 DNS, funnel
-  ingest/       — RFC 6962 CT log adapter + orchestrator
+  ingest/       — RFC 6962 CT log adapter + orchestrator + continuous runner
   llm/          — fixed-schema provider adapter (S5)
-  scheduler/    — discovery daemon loop
   domain/       — PSL normalization, candidates, reviews, retry policy
   storage/      — append-only SQLite store
 ```

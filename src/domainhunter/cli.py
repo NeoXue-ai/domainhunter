@@ -78,107 +78,6 @@ def _status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _discover(args: argparse.Namespace) -> int:
-    """Run direct strict CT polling and optional LLM enrichment on a loop."""
-
-    import logging
-
-    from domainhunter.scheduler.ct_discovery import CTDiscoveryDaemon
-
-    log_path = Path(args.database).with_suffix(".log")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler(log_path, encoding="utf-8"),
-        ],
-    )
-    _LOGGER.info(
-        "discover starting: database=%s logs=%s round_seconds=%s provider=%s log_file=%s",
-        args.database,
-        [t.log_id for t in (args.logs or (DEFAULT_LOG,))],
-        args.round_seconds,
-        args.provider,
-        log_path,
-    )
-    _LOGGER.info(
-        "each round polls new CT entries, filters, probes, and queues "
-        "candidates; Ctrl-C stops"
-    )
-
-    store = SQLiteStore(args.database)
-    logs = tuple(args.logs) if args.logs else (DEFAULT_LOG,)
-    provider = None
-    if args.provider == "mock":
-        provider = MockLLMProvider()
-    elif args.provider == "openai-compatible":
-        token = args.token or (
-            os.environ.get(args.token_env) if args.token_env else None
-        )
-        if not token:
-            raise ValueError(
-                "an OpenAI-compatible --token or --token-env is required"
-            )
-        provider = OpenAICompatibleProvider(
-            base_url=args.base_url, token=token, model=args.model
-        )
-
-    async def run() -> CTDiscoveryDaemon:
-        async with CTLogFetcher(
-            logs=logs,
-            catchup_entries=args.catchup,
-            max_entries_per_page=args.page_size,
-        ) as fetcher:
-            poller = CTPoller(store=store, fetch_page=fetcher)
-            async with HTTPProbe() as probe:
-                pipeline = DomainHunterPipeline(store=store, probe=probe)
-                strict_filter = FilterPipeline(
-                    tier1_days=args.tier1_days,
-                    tier2_days=args.tier2_days,
-                    require_dns=True,
-                    drop_unknown_rdap=True,
-                )
-                orchestrator = CTIngestOrchestrator(
-                    store=store,
-                    poller=poller,
-                    pipeline=pipeline,
-                    filter_pipeline=strict_filter,
-                    require_first_seen=True,
-                    probe_limit=args.max_domains_per_round,
-                    provider=provider,
-                )
-                daemon = CTDiscoveryDaemon(
-                    run_once=orchestrator.run_once,
-                    round_seconds=args.round_seconds,
-                )
-                if hasattr(provider, "aclose"):
-                    async with provider:  # type: ignore[union-attr]
-                        await daemon.run(max_rounds=args.max_rounds)
-                else:
-                    await daemon.run(max_rounds=args.max_rounds)
-                return daemon
-
-    try:
-        daemon = asyncio.run(run())
-    except KeyboardInterrupt:
-        print("\ndiscover: stopped by Ctrl-C", flush=True)
-        return 0
-    _print_json(
-        {
-            "rounds": daemon.round,
-            "successful_rounds": daemon.successful_rounds,
-            "failed_rounds": daemon.failed_rounds,
-            "last_error": daemon.last_error,
-            "source_errors": list(daemon.last_source_errors),
-            "database": str(args.database),
-        }
-    )
-    # Bounded invocations are commonly used by launchd/CI.  Surface an
-    # unavailable source as a real failure rather than a successful empty run.
-    return 1 if args.max_rounds is not None and daemon.failed_rounds else 0
-
-
 def _serve(args: argparse.Namespace) -> int:
     """Run the local review API against one explicit SQLite database."""
     uvicorn.run(create_app(args.database), host=args.host, port=args.port)
@@ -193,13 +92,13 @@ def _parse_log_spec(value: str) -> CTLogTarget:
     return CTLogTarget(log_id=log_id.strip(), base_url=base_url.strip())
 
 
-def _backfill(args: argparse.Namespace) -> int:
-    """Replay a past CT window through the same funnel, then drain the queue."""
+def _start(args: argparse.Namespace) -> int:
+    """Continuous discovery: sweep new CT entries at max speed until Ctrl-C."""
 
     import logging
 
     from domainhunter.filter.pipeline import FilterPipeline
-    from domainhunter.ingest.backfill import BackfillConfig, run_backfill
+    from domainhunter.ingest.runner import StartConfig, run_start
 
     logging.basicConfig(
         level=logging.INFO,
@@ -208,9 +107,10 @@ def _backfill(args: argparse.Namespace) -> int:
     log_path = Path(args.database).with_suffix(".log")
     logging.getLogger().addHandler(logging.FileHandler(log_path, encoding="utf-8"))
     _LOGGER.info(
-        "backfill starting: database=%s hours=%s claim_limit=%s rdap=%s probe=%s",
+        "start: database=%s hours=%s entries=%s claim_limit=%s rdap=%s probe=%s",
         args.database,
         args.hours,
+        args.entries,
         args.claim_limit,
         args.rdap_concurrency,
         args.probe_concurrency,
@@ -230,9 +130,11 @@ def _backfill(args: argparse.Namespace) -> int:
         )
 
     async def run() -> dict[str, object]:
-        config = BackfillConfig(
+        config = StartConfig(
             hours=args.hours,
             entries=args.entries,
+            follow=True,
+            idle_seconds=args.idle_seconds,
             page_delay_seconds=args.page_delay,
             claim_limit=args.claim_limit,
             round_delay_seconds=args.round_delay,
@@ -269,13 +171,19 @@ def _backfill(args: argparse.Namespace) -> int:
                     probe_limit=config.claim_limit,
                     provider=provider,
                     probe_concurrency=config.probe_concurrency,
-                    filter_retry_delay=timedelta(seconds=args.filter_retry_delay),
+                    filter_retry_delay=timedelta(
+                        seconds=(
+                            args.filter_retry_delay
+                            if args.filter_retry_delay is not None
+                            else 20.0
+                        )
+                    ),
                 )
 
                 def progress(event: dict[str, object]) -> None:
-                    _LOGGER.info("backfill %s", event)
+                    _LOGGER.info("start %s", event)
 
-                return await run_backfill(
+                return await run_start(
                     store=store,
                     fetcher=fetcher,
                     poller=poller,
@@ -287,7 +195,7 @@ def _backfill(args: argparse.Namespace) -> int:
     try:
         summary = asyncio.run(run())
     except KeyboardInterrupt:
-        print("\nbackfill: stopped by Ctrl-C (progress is saved; rerun to continue)", flush=True)
+        print("\nstart: stopped by Ctrl-C (progress is saved; rerun to continue)", flush=True)
         return 0
     _print_json(summary.as_payload())
     return 0
@@ -313,85 +221,52 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", default=8000, type=int)
     serve.set_defaults(handler=_serve)
 
-    discover = subparsers.add_parser(
-        "discover",
-        help="long-running strict RFC 6962 polling → first-seen → S1-S5 enrich",
+    start_cmd = subparsers.add_parser(
+        "start",
+        help="run continuous max-speed CT discovery until Ctrl-C",
     )
-    discover.add_argument("--database", required=True, type=Path)
-    discover.add_argument("--round-seconds", type=float, default=120.0)
-    discover.add_argument("--max-rounds", type=int)
-    discover.add_argument("--max-domains-per-round", type=int, default=200)
-    discover.add_argument(
-        "--log",
-        action="append",
-        dest="logs",
-        type=_parse_log_spec,
-        default=None,
-        help=(
-            "log spec of the form log_id=base_url; repeat for multiple logs "
-            f"(default: {DEFAULT_LOG.log_id}={DEFAULT_LOG.base_url})"
-        ),
-    )
-    discover.add_argument("--catchup", type=int, default=1000)
-    discover.add_argument("--page-size", type=int, default=500)
-    discover.add_argument(
-        "--provider",
-        choices=("none", "mock", "openai-compatible"),
-        default="none",
-        help="S5 LLM classification: none = rules-only (default), "
-        "mock = deterministic test provider, openai-compatible = any "
-        "OpenAI-compatible endpoint (requires --token or --token-env)",
-    )
-    discover.add_argument("--base-url")
-    discover.add_argument("--model")
-    discover.add_argument("--token")
-    discover.add_argument("--token-env")
-    discover.add_argument("--tier1-days", type=int, default=30)
-    discover.add_argument("--tier2-days", type=int, default=90)
-    discover.set_defaults(handler=_discover)
-
-    backfill_cmd = subparsers.add_parser(
-        "backfill",
-        help="replay a past CT window through the discovery funnel",
-    )
-    backfill_cmd.add_argument("--database", required=True, type=Path)
-    backfill_cmd.add_argument(
+    start_cmd.add_argument("--database", required=True, type=Path)
+    start_cmd.add_argument(
         "--hours", type=float, default=None,
-        help="replay the past N hours (ignored when --entries is given)",
+        help="optional: on the FIRST run, start from the past N hours",
     )
-    backfill_cmd.add_argument(
+    start_cmd.add_argument(
         "--entries", type=int, default=None,
-        help="replay the last N log entries (immune to STH cache lag; "
-        "recommended for the first run)",
+        help="optional: on the FIRST run, start from the last N log entries "
+        "(immune to STH cache lag; recommended for a fresh database)",
     )
-    backfill_cmd.add_argument(
+    start_cmd.add_argument(
+        "--idle-seconds", type=float, default=15.0,
+        help="in --follow mode, pause between sweep cycles (default 15)",
+    )
+    start_cmd.add_argument(
         "--log", action="append", dest="logs", type=_parse_log_spec, default=None,
         help="log spec of the form log_id=base_url; repeat for multiple logs",
     )
-    backfill_cmd.add_argument("--page-size", type=int, default=500)
-    backfill_cmd.add_argument("--page-delay", type=float, default=0.25)
-    backfill_cmd.add_argument("--claim-limit", type=int, default=400)
-    backfill_cmd.add_argument("--round-delay", type=float, default=10.0)
-    backfill_cmd.add_argument("--rdap-concurrency", type=int, default=6)
-    backfill_cmd.add_argument("--dns-concurrency", type=int, default=30)
-    backfill_cmd.add_argument("--probe-concurrency", type=int, default=16)
-    backfill_cmd.add_argument("--page-fetch-concurrency", type=int, default=8)
-    backfill_cmd.add_argument(
-        "--filter-retry-delay", type=float, default=300.0,
-        help="seconds before failed DNS/RDAP filter checks are retried "
-        "(backfill wants a small value; realtime uses the 300s default)",
+    start_cmd.add_argument("--page-size", type=int, default=500)
+    start_cmd.add_argument("--page-delay", type=float, default=0.25)
+    start_cmd.add_argument("--claim-limit", type=int, default=400)
+    start_cmd.add_argument("--round-delay", type=float, default=10.0)
+    start_cmd.add_argument("--rdap-concurrency", type=int, default=6)
+    start_cmd.add_argument("--dns-concurrency", type=int, default=30)
+    start_cmd.add_argument("--probe-concurrency", type=int, default=16)
+    start_cmd.add_argument("--page-fetch-concurrency", type=int, default=8)
+    start_cmd.add_argument(
+        "--filter-retry-delay", type=float, default=None,
+        help="seconds before failed DNS/RDAP checks are retried "
+        "(default 300, or 20 in --follow mode)",
     )
-    backfill_cmd.add_argument("--max-rounds", type=int)
-    backfill_cmd.add_argument("--tier1-days", type=int, default=30)
-    backfill_cmd.add_argument("--tier2-days", type=int, default=90)
-    backfill_cmd.add_argument(
+    start_cmd.add_argument("--max-rounds", type=int)
+    start_cmd.add_argument("--tier1-days", type=int, default=30)
+    start_cmd.add_argument("--tier2-days", type=int, default=90)
+    start_cmd.add_argument(
         "--provider", choices=("none", "mock", "openai-compatible"), default="none"
     )
-    backfill_cmd.add_argument("--base-url")
-    backfill_cmd.add_argument("--model")
-    backfill_cmd.add_argument("--token")
-    backfill_cmd.add_argument("--token-env")
-    backfill_cmd.set_defaults(handler=_backfill)
+    start_cmd.add_argument("--base-url")
+    start_cmd.add_argument("--model")
+    start_cmd.add_argument("--token")
+    start_cmd.add_argument("--token-env")
+    start_cmd.set_defaults(handler=_start)
 
     return parser
 

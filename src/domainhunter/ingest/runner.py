@@ -151,116 +151,19 @@ async def run_start(
     config: StartConfig,
     progress=None,
 ) -> StartSummary:
-    """Run one backfill: rewind, ingest the window, then digest the queue.
+    """Run the continuous discovery loop until interrupted.
 
-    Ingest fetches pages with bounded concurrency (servers cap page sizes,
-    so the stride is discovered from the first real response). If the store
-    cursor already sits inside the located window, ingest resumes from the
-    cursor instead of rewinding — repeated runs are incremental and safe.
-    ``digest_once()`` must run one orchestrator round.
+    ``digest_once()`` must run one digest-only orchestrator round
+    (``orchestrator.run_once(poll=False)``); ingest owns the CT cursor.
     """
     report = progress or (lambda event: _LOGGER.info("%s", event))
-    if config.follow:
-        return await _run_follow(
-            store=store,
-            fetcher=fetcher,
-            poller=poller,
-            digest_once=digest_once,
-            config=config,
-            progress=report,
-        )
-    since = (
-        datetime.now(UTC) - timedelta(hours=config.hours)
-        if config.hours is not None
-        else None
-    )
-
-    stored_map = _parse_stored_cursor(store.get_source_cursor(poller.source_name))
-    tree_sizes = await fetcher.tree_sizes()
-    start_indices: dict[str, int] = {}
-    resume_indices: dict[str, int] = {}
-    for target in fetcher.logs:
-        if config.entries is not None:
-            located = max(0, tree_sizes[target.log_id] - config.entries)
-        else:
-            located = await locate_start_index(
-                fetcher,
-                log_id=target.log_id,
-                since=since,  # type: ignore[arg-type]
-                tree_size=tree_sizes[target.log_id],
-            )
-            if located >= tree_sizes[target.log_id]:
-                report(
-                    {
-                        "event": "start.window_empty",
-                        "log": target.log_id,
-                        "hint": (
-                            "the log tail lags its public STH by tens of minutes; "
-                            "use --entries N instead of --hours for count-based windows"
-                        ),
-                    }
-                )
-        stored = stored_map.get(target.log_id)
-        # Resume when the stored cursor already sits inside this window.
-        resume = located
-        if stored is not None and located <= stored <= tree_sizes[target.log_id]:
-            resume = stored
-        start_indices[target.log_id] = located
-        resume_indices[target.log_id] = resume
-        report(
-            {
-                "event": "start.located_start",
-                "log": target.log_id,
-                "tree_size": tree_sizes[target.log_id],
-                "start_index": located,
-                "resume_index": resume,
-                "window_entries": tree_sizes[target.log_id] - located,
-            }
-        )
-
-    ingested, queued_before = await _ingest_window(
+    return await _run_follow(
         store=store,
         fetcher=fetcher,
         poller=poller,
-        resume_indices=resume_indices,
-        tree_sizes=tree_sizes,
+        digest_once=digest_once,
         config=config,
         progress=report,
-    )
-    report({"event": "start.ingest_done", "ingested": ingested, "pending_work": queued_before})
-    rounds = 0
-    probes_run = 0
-    candidates_created = 0
-    while True:
-        summary = await digest_once()
-        rounds += 1
-        probes_run += summary.probes_run
-        candidates_created += summary.candidates_created
-        pending = store.pending_ct_discovery_work_count()
-        report(
-            {
-                "event": "start.digest_round",
-                "round": rounds,
-                "probes": summary.probes_run,
-                "candidates": summary.candidates_created,
-                "pending_work": pending,
-            }
-        )
-        if pending == 0:
-            break
-        if config.max_rounds is not None and rounds >= config.max_rounds:
-            report({"event": "start.round_budget_exhausted", "rounds": rounds})
-            break
-        await asyncio.sleep(config.round_delay_seconds)
-
-    return StartSummary(
-        ingested_entries=ingested,
-        queued_domains=queued_before,
-        probes_run=probes_run,
-        candidates_created=candidates_created,
-        rounds=rounds,
-        pending_work=store.pending_ct_discovery_work_count(),
-        start_indices=start_indices,
     )
 
 
@@ -317,37 +220,44 @@ async def _run_follow(
             else:
                 resume_indices[log_id] = tree_sizes[log_id]
         first_cycle = False
-        ingested, queued = await _ingest_window(
-            store=store,
-            fetcher=fetcher,
-            poller=poller,
-            resume_indices=resume_indices,
-            tree_sizes=tree_sizes,
-            config=config,
-            progress=progress,
-        )
-        total_ingested += ingested
 
-        rounds = 0
-        while True:
-            summary = await digest_once()
-            rounds += 1
-            total_rounds += 1
-            total_probes += summary.probes_run
-            total_candidates += summary.candidates_created
-            pending = store.pending_ct_discovery_work_count()
-            if config.max_rounds is not None and rounds >= config.max_rounds:
-                break
-            if pending == 0:
-                break
-            await asyncio.sleep(config.round_delay_seconds)
+        # Candidates must appear while the sweep is still running, not only
+        # after it finishes: ingest and digest run side by side, sharing the
+        # work queue as the hand-off.
+        ingest_task = asyncio.create_task(
+            _ingest_window(
+                store=store,
+                fetcher=fetcher,
+                poller=poller,
+                resume_indices=resume_indices,
+                tree_sizes=tree_sizes,
+                config=config,
+                progress=progress,
+            )
+        )
+        digest_task = asyncio.create_task(
+            _digest_alongside(
+                digest_once=digest_once,
+                store=store,
+                config=config,
+                ingest_task=ingest_task,
+                progress=progress,
+                cycle=cycle,
+            )
+        )
+        ingested, queued = await ingest_task
+        rounds, cycle_probes, cycle_candidates = await digest_task
+        total_ingested += ingested
+        total_rounds += rounds
+        total_probes += cycle_probes
+        total_candidates += cycle_candidates
         progress(
             {
                 "event": "start.cycle",
                 "cycle": cycle,
                 "cycle_ingested": ingested,
                 "cycle_digest_rounds": rounds,
-                "cycle_candidates": summary.candidates_created,
+                "cycle_candidates": cycle_candidates,
                 "queued_domains": queued,
                 "pending_work": store.pending_ct_discovery_work_count(),
                 "total_ingested": total_ingested,
@@ -355,6 +265,48 @@ async def _run_follow(
             }
         )
         await asyncio.sleep(config.idle_seconds)
+
+
+async def _digest_alongside(
+    *,
+    digest_once,
+    store: SQLiteStore,
+    config: StartConfig,
+    ingest_task: "asyncio.Task[object]",
+    progress,
+    cycle: int,
+) -> tuple[int, int, int]:
+    """Digest rounds running concurrently with the ingest sweep.
+
+    Returns ``(rounds, probes, candidates)`` for the cycle. Stops when the
+    sweep is finished and the work queue is drained (or the round budget
+    for this cycle is exhausted)."""
+    rounds = 0
+    probes = 0
+    candidates = 0
+    while True:
+        if ingest_task.done() and store.pending_ct_discovery_work_count() == 0:
+            return rounds, probes, candidates
+        summary = await digest_once()
+        rounds += 1
+        probes += summary.probes_run
+        candidates += summary.candidates_created
+        progress(
+            {
+                "event": "start.digest_round",
+                "cycle": cycle,
+                "round": rounds,
+                "probes": summary.probes_run,
+                "candidates": summary.candidates_created,
+                "candidates_total": candidates,
+                "pending_work": store.pending_ct_discovery_work_count(),
+            }
+        )
+        if config.max_rounds is not None and rounds >= config.max_rounds:
+            return rounds, probes, candidates
+        if ingest_task.done() and store.pending_ct_discovery_work_count() == 0:
+            return rounds, probes, candidates
+        await asyncio.sleep(config.round_delay_seconds)
 
 
 def _parse_stored_cursor(cursor: str | None) -> dict[str, int]:

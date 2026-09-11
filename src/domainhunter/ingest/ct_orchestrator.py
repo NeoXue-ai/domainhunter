@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from domainhunter.filter.pipeline import FilterDecision, FilterPipeline, FilteredCandidate
-from domainhunter.ingest.ct_poller import CTPoller
+from domainhunter.ingest.ct_poller import CTPoller, CTPollResult
 from domainhunter.llm.provider import LLMProvider
 from domainhunter.pipeline import DomainHunterPipeline, enrich_candidate_with_llm
 from domainhunter.storage.sqlite import SQLiteStore
@@ -84,19 +84,33 @@ class CTIngestOrchestrator:
         self._filter_retry_delay = filter_retry_delay
 
     async def run_once(
-        self, *, observed_at: datetime | None = None
+        self, *, observed_at: datetime | None = None, poll: bool = True
     ) -> CTIngestRunSummary:
-        """Poll one CT page, then probe each newly-seen registrable root."""
+        """Poll one CT page (unless ``poll=False``), then process due work.
+
+        ``poll=False`` runs a digest-only round against whatever the
+        continuous runner has already ingested — that lets ``start``
+        sweep pages and produce candidates at the same time.
+        """
         stamp = observed_at or datetime.now(UTC)
-        domains_before = set(self._store.list_domains())
-        poll_result = await self._poller.poll()
-        # Live CT entries are stamped while the HTTP poll is in progress.  Use
-        # the post-poll clock for an implicit live run so those just-persisted
-        # tasks are eligible immediately, rather than waiting a full round.
-        if observed_at is None:
-            stamp = datetime.now(UTC)
-        domains_after = set(self._store.list_domains())
-        new_roots = sorted(domains_after - domains_before)
+        if poll:
+            domains_before = set(self._store.list_domains())
+            poll_result = await self._poller.poll()
+            # Live CT entries are stamped while the HTTP poll is in progress.
+            # Use the post-poll clock for an implicit live run so those
+            # just-persisted tasks are eligible immediately.
+            if observed_at is None:
+                stamp = datetime.now(UTC)
+            domains_after = set(self._store.list_domains())
+            new_roots = sorted(domains_after - domains_before)
+        else:
+            poll_result = CTPollResult(
+                next_cursor=self._store.get_source_cursor(self._poller.source_name),
+                certificates_seen=0,
+                events_seen=0,
+                events_added=0,
+            )
+            new_roots = []
         work_items = self._store.claim_ct_discovery_work(
             now=stamp,
             lease_seconds=self._work_lease_seconds,

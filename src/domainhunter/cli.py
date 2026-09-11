@@ -187,7 +187,7 @@ def _start(args: argparse.Namespace) -> int:
                     store=store,
                     fetcher=fetcher,
                     poller=poller,
-                    digest_once=orchestrator.run_once,
+                    digest_once=lambda: orchestrator.run_once(poll=False),
                     config=config,
                     progress=progress,
                 )

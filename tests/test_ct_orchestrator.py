@@ -27,6 +27,7 @@ from domainhunter.domain.observations import OutcomeCode
 from domainhunter.filter.dns_check import DnsResult
 from domainhunter.filter.pipeline import FilterPipeline
 from domainhunter.filter.rdap_age import MemoryCache, Registration
+from domainhunter.domain.events import SourceEvent
 from domainhunter.ingest.ct_events import build_ct_events
 from domainhunter.ingest.ct_orchestrator import CTIngestOrchestrator
 from domainhunter.ingest.ct_poller import CTCertificate, CTPage, CTPoller
@@ -802,3 +803,30 @@ def test_probe_concurrency_isolates_failures(tmp_path) -> None:
     assert summary.pending_work == 1  # boom-ai.com was retried, still pending
     queue_domains = {item.candidate.domain for item in store.list_review_queue()}
     assert queue_domains == {"alpha-ai.com", "beta-ai.com", "delta-ai.com"}
+
+
+def test_digest_only_round_processes_work_without_polling(tmp_path) -> None:
+    """`run_once(poll=False)` must not touch the CT cursor or poller."""
+    store = SQLiteStore(tmp_path / "domainhunter.db")
+    store.append_source_event(
+        SourceEvent("ct_log", "x:1", "quiet-ai.com", _OBSERVED),
+        hostname="quiet-ai.com",
+    )
+
+    async def exploding_fetch(_cursor: str | None) -> CTPage:
+        raise AssertionError("poll=False must never call the poller")
+
+    poller = CTPoller(store=store, fetch_page=exploding_fetch)
+    probe = _FakeProbe({"quiet-ai.com": _ai_publishable("quiet-ai.com")})
+    pipeline = DomainHunterPipeline(store=store, probe=probe)  # type: ignore[arg-type]
+    orchestrator = CTIngestOrchestrator(
+        store=store, poller=poller, pipeline=pipeline, probe_limit=10
+    )
+
+    async def digest() -> CTIngestRunSummary:
+        return await orchestrator.run_once(observed_at=_OBSERVED, poll=False)
+
+    summary = _run(digest())
+    assert summary.certificates_seen == 0
+    assert summary.probes_run == 1
+    assert summary.candidates_created == 1
